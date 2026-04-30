@@ -31,7 +31,7 @@ from src.data.persist import bulk_upsert_espn, get_conn  # noqa: E402
 from src.data.wplay_scraper import (  # noqa: E402
     WplayOdds,
     normalize_name,
-    scrape_all as scrape_wplay_all,
+    scrape_all_with_markets,
 )
 from src.notifications.telegram_bot import send_message  # noqa: E402
 from src.tracking.pick_logger import get_current_bankroll, log_pick  # noqa: E402
@@ -373,26 +373,30 @@ async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
 
     wplay_odds: list = []
     try:
-        wplay_odds = await scrape_wplay_all()
+        wplay_odds = await scrape_all_with_markets()
     except Exception as exc:
-        logger.warning(f"Wplay scrape failed: {exc}")
+        logger.warning(f"Wplay multi-market scrape failed: {exc}")
 
     bankroll = get_current_bankroll("paper")
     candidates: list[dict] = []
     if wplay_odds:
-        odds_by_match: dict[tuple[str, str], dict[str, float]] = {}
+        # Index by (norm_home, norm_away) -> { (market, selection): odds }
+        # NOTE: keyed on (market, selection) — not just selection — so that
+        # ou_1.5:over and ou_2.5:over don't collide.
+        odds_by_match: dict[tuple[str, str], dict[tuple[str, str], float]] = {}
         for o in wplay_odds:
             key = (normalize_name(o.home_team), normalize_name(o.away_team))
-            odds_by_match.setdefault(key, {})[o.selection] = o.odds
+            odds_by_match.setdefault(key, {})[(o.market, o.selection)] = o.odds
 
         for p in predictions_summary:
             key = (normalize_name(p["home"]), normalize_name(p["away"]))
             casa = odds_by_match.get(key)
             if not casa:
                 continue
-            lines = [
-                OddsLine("1x2", sel, casa[sel], bookmaker="wplay")
-                for sel in ("home", "draw", "away") if sel in casa
+
+            lines: list[OddsLine] = [
+                OddsLine(market, selection, odds, bookmaker="wplay")
+                for (market, selection), odds in casa.items()
             ]
             value_bets = detect_value(
                 match_id=p["match_id"],

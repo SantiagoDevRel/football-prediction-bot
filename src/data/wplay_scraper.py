@@ -241,8 +241,167 @@ async def scrape_league(league_slug: str, timeout_ms: int = 30_000) -> list[Wpla
             pass
 
 
+async def scrape_match_markets(
+    event_id: str, league_slug: str, home_team: str, away_team: str,
+    timeout_ms: int = 25_000,
+) -> list[WplayOdds]:
+    """Visit /es/e/{event_id}/... and extract all markets visible inline.
+
+    Markets pulled today (must be present in initial HTML, no expand-on-click):
+      - 1X2 (Resultado Tiempo Completo)
+      - BTTS (Ambos Equipos Anotan)
+      - O/U 1.5, 2.5, 3.5 (from "Total Goles Más/Menos de" group market)
+
+    Lazy-loaded markets (hándicap asiático, marcador correcto) are skipped.
+    """
+    url = f"https://apuestas.wplay.co/es/e/{event_id}/"
+    browser, page = await _open_page()
+    out: list[WplayOdds] = []
+    captured_at = datetime.now(tz=timezone.utc)
+    try:
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        except Exception as exc:
+            logger.warning(f"match nav {event_id} failed: {exc}")
+            return out
+        # Let JS render markets
+        try:
+            await page.wait_for_selector("button.price[title]", timeout=15_000)
+        except Exception:
+            logger.warning(f"[match {event_id}] no price buttons rendered in time")
+            return out
+        await page.wait_for_timeout(2_000)
+
+        # 1X2: prices in mkt with name "Resultado Tiempo Completo"
+        try:
+            buttons_1x2 = await page.query_selector_all(
+                f"button.price[title='{home_team} ']"
+            )
+            home_btn = buttons_1x2[0] if buttons_1x2 else None
+            buttons_draw = await page.query_selector_all(
+                "button.price[title='Empate ']"
+            )
+            draw_btn = buttons_draw[0] if buttons_draw else None
+            buttons_away = await page.query_selector_all(
+                f"button.price[title='{away_team} ']"
+            )
+            away_btn = buttons_away[0] if buttons_away else None
+
+            for sel, btn in (("home", home_btn), ("draw", draw_btn), ("away", away_btn)):
+                if btn is None:
+                    continue
+                dec = await btn.query_selector("span.price.dec")
+                if dec is None:
+                    continue
+                val = _safe_dec(await dec.inner_text())
+                if val is None:
+                    continue
+                out.append(WplayOdds(
+                    league_slug=league_slug, home_team=home_team, away_team=away_team,
+                    event_id=event_id, market="1x2", selection=sel, odds=val,
+                    captured_at=captured_at,
+                ))
+        except Exception as exc:
+            logger.warning(f"[match {event_id}] 1X2 parse error: {exc}")
+
+        # BTTS: title="Si " and title="No "
+        try:
+            for sel, title in (("yes", "Si "), ("no", "No ")):
+                btn = await page.query_selector(f"button.price[title='{title}']")
+                if btn is None:
+                    continue
+                dec = await btn.query_selector("span.price.dec")
+                if dec is None:
+                    continue
+                val = _safe_dec(await dec.inner_text())
+                if val is None:
+                    continue
+                out.append(WplayOdds(
+                    league_slug=league_slug, home_team=home_team, away_team=away_team,
+                    event_id=event_id, market="btts", selection=sel, odds=val,
+                    captured_at=captured_at,
+                ))
+        except Exception as exc:
+            logger.warning(f"[match {event_id}] BTTS parse error: {exc}")
+
+        # O/U total goals: "Más de 1.5", "Menos de 1.5", "Más de 2.5", "Menos de 2.5", etc.
+        for line in (1.5, 2.5, 3.5):
+            for sel, label in (("over", f"Más de {line}"), ("under", f"Menos de {line}")):
+                btn = await page.query_selector(f"button.price[title='{label}']")
+                if btn is None:
+                    continue
+                dec = await btn.query_selector("span.price.dec")
+                if dec is None:
+                    continue
+                val = _safe_dec(await dec.inner_text())
+                if val is None:
+                    continue
+                out.append(WplayOdds(
+                    league_slug=league_slug, home_team=home_team, away_team=away_team,
+                    event_id=event_id, market=f"ou_{line}", selection=sel, odds=val,
+                    captured_at=captured_at,
+                ))
+
+        logger.info(f"[match {event_id}] extracted {len(out)} odds across markets")
+        return out
+    finally:
+        try:
+            await browser.close()
+        except Exception:
+            pass
+
+
+def _safe_dec(text: str | None) -> float | None:
+    if not text:
+        return None
+    s = text.strip()
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if 1.01 <= v <= 200.0:
+        return v
+    return None
+
+
+async def scrape_all_with_markets() -> list[WplayOdds]:
+    """Two-phase scrape:
+        1. Visit league pages for both leagues -> list of (event_id, home, away)
+        2. For each event, visit the match page -> all markets we can read
+
+    Slower than scrape_all() (~30-60s instead of ~10s) but returns 5-10x more
+    odds rows because we get O/U + BTTS in addition to 1X2.
+    """
+    out: list[WplayOdds] = []
+    league_results: list[tuple[str, str, str, str]] = []  # (slug, event_id, home, away)
+    for slug in WPLAY_LEAGUE_URLS:
+        rows = await scrape_league(slug)
+        # rows already give us 1X2; gather unique events
+        seen: set[str] = set()
+        for r in rows:
+            if r.event_id in seen:
+                continue
+            seen.add(r.event_id)
+            league_results.append((slug, r.event_id, r.home_team, r.away_team))
+        # keep the 1X2 odds we already have so we don't waste them
+        out.extend(rows)
+
+    # Now visit each match for its multi-market data. Skip 1X2 (already have it).
+    for slug, event_id, home, away in league_results:
+        try:
+            extra = await scrape_match_markets(event_id, slug, home, away)
+        except Exception as exc:
+            logger.warning(f"[match {event_id}] market scrape failed: {exc}")
+            continue
+        # Drop 1X2 from extra (already in `out` from league pages)
+        extra_no_1x2 = [o for o in extra if o.market != "1x2"]
+        out.extend(extra_no_1x2)
+
+    return out
+
+
 async def scrape_all() -> list[WplayOdds]:
-    """Scrape both target leagues sequentially."""
+    """Scrape both target leagues sequentially. Returns 1X2 only (fast path)."""
     out: list[WplayOdds] = []
     for slug in WPLAY_LEAGUE_URLS:
         out.extend(await scrape_league(slug))

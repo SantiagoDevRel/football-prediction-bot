@@ -104,10 +104,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
+    wait_msg = (
+        "⏳ Analizando partidos y cuotas (1X2 + BTTS + O/U) en Wplay…\n"
+        "<i>Esto tarda ~1 minuto porque visito cada match page para sacar todos los mercados.</i>"
+    )
     if update.message:
-        await update.message.reply_text("⏳ Analizando partidos y cuotas en Wplay…")
+        await update.message.reply_text(wait_msg, parse_mode=ParseMode.HTML)
     else:
-        await update.callback_query.message.reply_text("⏳ Analizando partidos y cuotas en Wplay…")
+        await update.callback_query.message.reply_text(wait_msg, parse_mode=ParseMode.HTML)
 
     # Import here to avoid heavy import at module load
     from scripts.daily_pipeline import run_pipeline_core
@@ -390,7 +394,10 @@ async def cmd_historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Find a specific match by team-name fragments and produce a full analysis."""
-    from src.data.wplay_scraper import normalize_name, scrape_all as scrape_wplay_all
+    from src.data.wplay_scraper import (
+        normalize_name, scrape_league as scrape_wplay_league,
+        scrape_match_markets,
+    )
     from scripts.daily_pipeline import _load_models, _ensemble_predict, _league_slug_from_name
 
     args = context.args
@@ -507,15 +514,29 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     avg, _ = pred_result
 
-    # If the match is in the future and in our two leagues, try to grab Wplay odds.
-    casa_1x2: dict[str, float] = {}
+    # If the match is in the future and in our two leagues, try to grab Wplay odds
+    # across all available markets (1X2 + BTTS + O/U lines).
+    casa_odds: dict[tuple[str, str], float] = {}  # (market, selection) -> odds
     if status == "scheduled":
         try:
-            wplay = await scrape_wplay_all()
+            league_rows = await scrape_wplay_league(league_slug)
             target_key = (normalize_name(home), normalize_name(away))
-            for o in wplay:
-                if (normalize_name(o.home_team), normalize_name(o.away_team)) == target_key:
-                    casa_1x2[o.selection] = o.odds
+            event_id: str | None = None
+            wplay_home, wplay_away = home, away
+            for r in league_rows:
+                if (normalize_name(r.home_team), normalize_name(r.away_team)) == target_key:
+                    event_id = r.event_id
+                    wplay_home, wplay_away = r.home_team, r.away_team
+                    break
+            if event_id:
+                full = await scrape_match_markets(event_id, league_slug, wplay_home, wplay_away)
+                for o in full:
+                    casa_odds[(o.market, o.selection)] = o.odds
+            else:
+                # Fall back: at least we have 1X2 from league_rows
+                for r in league_rows:
+                    if (normalize_name(r.home_team), normalize_name(r.away_team)) == target_key:
+                        casa_odds[(r.market, r.selection)] = r.odds
         except Exception as exc:
             logger.warning(f"Wplay scrape during /analizar failed: {exc}")
 
@@ -540,45 +561,83 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"  {away} +1.5: {avg.p_away_plus_1_5:.0%}",
     ]
 
-    if casa_1x2:
-        parts.append("")
-        parts.append("<b>Cuotas Wplay (1X2)</b>")
-        parts.append(
-            f"  H: {casa_1x2.get('home', '—')}  ·  X: {casa_1x2.get('draw', '—')}  ·  A: {casa_1x2.get('away', '—')}"
-        )
-        # Edge per selection
-        edges = []
-        for sel, prob in (("home", avg.p_home_win), ("draw", avg.p_draw), ("away", avg.p_away_win)):
-            if sel in casa_1x2:
-                e = edge_fn(casa_1x2[sel], prob)
-                edges.append((sel, prob, casa_1x2[sel], e))
-        edges.sort(key=lambda x: -x[3])
-        if edges and edges[0][3] >= settings.min_edge:
-            best = edges[0]
-            sel_es = {"home": f"Gana {home}", "draw": "Empate", "away": f"Gana {away}"}[best[0]]
+    if casa_odds:
+        # Compute edge for every market+selection combo we have casa odds for
+        market_to_prob: dict[tuple[str, str], float] = {
+            ("1x2", "home"): avg.p_home_win,
+            ("1x2", "draw"): avg.p_draw,
+            ("1x2", "away"): avg.p_away_win,
+            ("btts", "yes"): avg.p_btts_yes,
+            ("btts", "no"): avg.p_btts_no,
+            ("ou_1.5", "over"): avg.p_over_1_5,
+            ("ou_1.5", "under"): avg.p_under_1_5,
+            ("ou_2.5", "over"): avg.p_over_2_5,
+            ("ou_2.5", "under"): avg.p_under_2_5,
+            ("ou_3.5", "over"): avg.p_over_3_5,
+            ("ou_3.5", "under"): avg.p_under_3_5,
+        }
+        ranked: list[tuple[str, str, float, float, float]] = []  # market, sel, prob, odds, edge
+        for (market, sel), odds_val in casa_odds.items():
+            prob = market_to_prob.get((market, sel))
+            if prob is None or not (0.02 < prob < 0.98):
+                continue
+            e = edge_fn(odds_val, prob)
+            ranked.append((market, sel, prob, odds_val, e))
+        ranked.sort(key=lambda x: -x[4])
+
+        # Show 1X2 cuotas summary line
+        sel_to_odds_1x2 = {sel: casa_odds[("1x2", sel)] for sel in ("home", "draw", "away")
+                            if ("1x2", sel) in casa_odds}
+        if sel_to_odds_1x2:
             parts.append("")
+            parts.append("<b>Cuotas Wplay</b>")
             parts.append(
-                f"<b>💡 Mejor pick 1X2:</b> {sel_es} @ {best[2]:.2f}  "
-                f"(<b>edge +{best[3]*100:.0f}%</b>)"
+                f"  1X2: H {sel_to_odds_1x2.get('home', '—')} · "
+                f"X {sel_to_odds_1x2.get('draw', '—')} · "
+                f"A {sel_to_odds_1x2.get('away', '—')}"
             )
-        elif edges:
-            best = edges[0]
+            for line in (1.5, 2.5, 3.5):
+                key_o = (f"ou_{line}", "over")
+                key_u = (f"ou_{line}", "under")
+                if key_o in casa_odds and key_u in casa_odds:
+                    parts.append(
+                        f"  Más {line}: {casa_odds[key_o]:.2f} · Menos {line}: {casa_odds[key_u]:.2f}"
+                    )
+            if ("btts", "yes") in casa_odds and ("btts", "no") in casa_odds:
+                parts.append(
+                    f"  BTTS sí: {casa_odds[('btts', 'yes')]:.2f} · "
+                    f"BTTS no: {casa_odds[('btts', 'no')]:.2f}"
+                )
+
+        # Top picks with edge between MIN_EDGE and MAX_EDGE
+        good = [r for r in ranked if settings.min_edge <= r[4] <= settings.max_edge]
+        if good:
             parts.append("")
-            parts.append(
-                f"<i>El mejor pick 1X2 da edge {best[3]*100:+.0f}% — debajo del mínimo (5%). No vale.</i>"
-            )
+            parts.append("<b>💡 Picks con value</b>")
+            for market, sel, prob, odds_val, e in good[:5]:
+                action = _humanize_action(market, sel, home, away)
+                parts.append(
+                    f"  • {action} @ <b>{odds_val:.2f}</b>  "
+                    f"<i>(modelo {prob:.0%} · edge +{e*100:.0f}%)</i>"
+                )
+        elif ranked:
+            best = ranked[0]
+            parts.append("")
+            if best[4] > settings.max_edge:
+                parts.append(
+                    f"<i>El mejor edge es +{best[4]*100:.0f}% — sospechoso. "
+                    f"Filtrado por límite de 30%.</i>"
+                )
+            else:
+                parts.append(
+                    f"<i>Mejor edge: {best[4]*100:+.0f}% — abajo del mínimo (5%). No vale apostar.</i>"
+                )
     else:
         parts.append("")
         parts.append(
             "<i>(No tengo cuotas de Wplay para este partido en este momento. "
             "Probá /picks o /analizar en pre-match cuando estén abiertas las cuotas.)</i>"
         )
-
-    parts.append("")
-    parts.append(
-        "<i>⚠️ Análisis pre-partido. Otros mercados (O/U, hándicap, BTTS) "
-        "aún no tienen scraping de Wplay automatizado.</i>"
-    )
 
     msg = "\n".join(parts)
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
