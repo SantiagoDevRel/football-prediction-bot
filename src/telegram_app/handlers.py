@@ -78,8 +78,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"<i>Paper trading · Bankroll: ${bankroll:,.0f} COP</i>\n\n"
         "<b>Comandos:</b>\n"
         "/picks — analizar partidos próximos\n"
+        "/envivo — partidos en vivo (con disclaimer)\n"
+        "/analizar &lt;eq1&gt; &lt;eq2&gt; — analizar UN partido específico\n"
         "/aposte &lt;n&gt; [stake] — registrar apuesta\n"
-        "/resolver &lt;pick_id&gt; ganada|perdida — marcar resultado\n"
+        "/resolver_auto — resolver picks ya finalizadas\n"
+        "/resolver &lt;pick_id&gt; ganada|perdida — manual\n"
         "/balance — bankroll y picks abiertas\n"
         "/historial — últimas resueltas\n"
         "/help — ver esta ayuda\n\n"
@@ -354,6 +357,160 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f"${p['stake']:,.0f}"
             )
     await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
+
+
+# ---------- /envivo ----------
+
+async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show currently in-play matches with conditional predictions.
+
+    Uses in-play v0 (Poisson-on-remaining-time) — explicit disclaimer:
+    this is NOT a model trained on minute-by-minute data.
+    """
+    from datetime import date as _date
+    from src.data.espn import fetch_scoreboard
+    from src.data.persist import bulk_upsert_espn
+    from src.data.wplay_scraper import scrape_match_markets
+    from src.models.inplay_v0 import condition_on_state
+    from scripts.daily_pipeline import _ensemble_predict, _league_slug_from_name, _load_models, LEAGUES
+
+    await update.message.reply_text(
+        "⏳ Buscando partidos en vivo en ESPN…",
+        parse_mode=ParseMode.HTML,
+    )
+
+    today = _date.today()
+    live_matches: list[dict] = []
+    for slug in LEAGUES:
+        try:
+            ms = await fetch_scoreboard(slug, today)
+            bulk_upsert_espn(ms)
+            for m in ms:
+                if m.status == "live":
+                    live_matches.append({
+                        "event_id": m.espn_id, "league_slug": slug,
+                        "home_team": m.home_team, "away_team": m.away_team,
+                        "home_goals": m.home_goals or 0, "away_goals": m.away_goals or 0,
+                        "minute": m.minute or 0,
+                    })
+        except Exception as exc:
+            logger.warning(f"ESPN live fetch {slug} failed: {exc}")
+
+    if not live_matches:
+        await update.message.reply_text(
+            "<b>📺 En vivo</b>\n\n"
+            "No hay partidos en vivo en este momento (Premier League o Liga BetPlay).\n\n"
+            "<i>Probá de nuevo más tarde.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Match each live event to our DB so we can pull team_ids -> models
+    parts = [
+        "<b>📺 Partidos en vivo</b>",
+        f"<i>{len(live_matches)} partido(s) en juego</i>",
+        "",
+        "<b>⚠️ DISCLAIMER:</b> el modelo in-play es <b>v0 honesto</b> — "
+        "una recomputación matemática (Poisson sobre el tiempo restante) "
+        "del modelo pre-partido. NO está entrenado con datos minuto-a-minuto. "
+        "<b>Apostá en vivo solo apuestas chicas hasta tener un modelo in-play real.</b>",
+        "",
+    ]
+
+    for lm in live_matches:
+        # Find match in DB to pull team ids
+        with get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT m.id, m.home_team_id, m.away_team_id,
+                       l.name as league_name
+                  FROM matches m
+                  JOIN leagues l ON m.league_id = l.id
+                 WHERE m.api_id = ?
+                """, (int(lm["event_id"]),)
+            ).fetchone()
+        if not row:
+            continue
+
+        models = _load_models(lm["league_slug"])
+        if not models:
+            continue
+        ensemble = _ensemble_predict(models, row["home_team_id"], row["away_team_id"])
+        if ensemble is None:
+            continue
+        avg, _ = ensemble
+
+        live_pred = condition_on_state(
+            avg, lm["home_goals"], lm["away_goals"], minute=lm["minute"]
+        )
+
+        # Try to fetch live Wplay odds for this match
+        casa: dict[tuple[str, str], float] = {}
+        try:
+            full = await scrape_match_markets(
+                lm["event_id"], lm["league_slug"],
+                lm["home_team"], lm["away_team"],
+            )
+            for o in full:
+                casa[(o.market, o.selection)] = o.odds
+        except Exception as exc:
+            logger.warning(f"live Wplay scrape failed for {lm['event_id']}: {exc}")
+
+        league_short = "Premier" if "Premier" in row["league_name"] else "BetPlay"
+        score = f"{lm['home_goals']}-{lm['away_goals']}"
+        parts.append(f"<b>⚽ {lm['home_team']} {score} {lm['away_team']}</b>")
+        parts.append(f"<i>{league_short} · min {lm['minute']}'</i>")
+        parts.append("")
+        parts.append("<b>Predicciones del partido (final esperado)</b>")
+        parts.append(
+            f"  1X2: H={live_pred.p_home_win:.0%} · D={live_pred.p_draw:.0%} · A={live_pred.p_away_win:.0%}"
+        )
+        parts.append(
+            f"  O/U 2.5: {live_pred.p_over_2_5:.0%} / {live_pred.p_under_2_5:.0%}  ·  "
+            f"BTTS: {live_pred.p_btts_yes:.0%} / {live_pred.p_btts_no:.0%}"
+        )
+
+        # Edge analysis if we have casa odds
+        if casa:
+            market_to_prob = {
+                ("1x2", "home"): live_pred.p_home_win,
+                ("1x2", "draw"): live_pred.p_draw,
+                ("1x2", "away"): live_pred.p_away_win,
+                ("btts", "yes"): live_pred.p_btts_yes,
+                ("btts", "no"): live_pred.p_btts_no,
+                ("ou_1.5", "over"): live_pred.p_over_1_5,
+                ("ou_1.5", "under"): live_pred.p_under_1_5,
+                ("ou_2.5", "over"): live_pred.p_over_2_5,
+                ("ou_2.5", "under"): live_pred.p_under_2_5,
+                ("ou_3.5", "over"): live_pred.p_over_3_5,
+                ("ou_3.5", "under"): live_pred.p_under_3_5,
+            }
+            ranked = []
+            for (market, sel), odds_val in casa.items():
+                prob = market_to_prob.get((market, sel))
+                if prob is None or not (0.02 < prob < 0.98):
+                    continue
+                e = edge_fn(odds_val, prob)
+                ranked.append((market, sel, prob, odds_val, e))
+            ranked.sort(key=lambda x: -x[4])
+            good = [r for r in ranked if settings.min_edge <= r[4] <= settings.max_edge]
+            if good:
+                parts.append("")
+                parts.append("<b>💡 Posible value (con disclaimer)</b>")
+                for market, sel, prob, odds_val, e in good[:3]:
+                    action = _humanize_action(market, sel, lm["home_team"], lm["away_team"])
+                    parts.append(
+                        f"  • {action} @ <b>{odds_val:.2f}</b> "
+                        f"<i>(modelo {prob:.0%}, edge +{e*100:.0f}%)</i>"
+                    )
+        parts.append("")
+        parts.append("━━━━━━━━━━━━━━━━━━━")
+        parts.append("")
+
+    msg = "\n".join(parts)
+    if len(msg) > 4000:
+        msg = msg[:3990] + "\n…<i>(truncado)</i>"
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
 # ---------- /resolver_auto ----------

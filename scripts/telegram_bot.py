@@ -23,6 +23,7 @@ from src.telegram_app.handlers import (  # noqa: E402
     cmd_analizar,
     cmd_aposte,
     cmd_balance,
+    cmd_envivo,
     cmd_help,
     cmd_historial,
     cmd_picks,
@@ -49,6 +50,7 @@ def main() -> None:
     app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CommandHandler("historial", cmd_historial))
     app.add_handler(CommandHandler("analizar", cmd_analizar))
+    app.add_handler(CommandHandler("envivo", cmd_envivo))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     logger.info("Bot is running. Press Ctrl+C to stop.")
