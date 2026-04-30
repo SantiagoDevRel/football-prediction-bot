@@ -403,36 +403,28 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    # Tokens: split on "vs" if present, else use first half / second half
-    full = " ".join(args)
-    if " vs " in full.lower():
-        home_q, away_q = [s.strip() for s in full.lower().split(" vs ", 1)]
+    # Strategy: try every possible split point and pick the one that finds a match.
+    # If user wrote "once caldas vs nacional", split on " vs " first.
+    # Otherwise try every i in 1..len-1 as the split between home and away.
+    full = " ".join(args).lower()
+
+    candidates: list[tuple[str, str]] = []
+    if " vs " in full:
+        h, a = [s.strip() for s in full.split(" vs ", 1)]
+        candidates.append((h, a))
+    elif " v " in full:
+        h, a = [s.strip() for s in full.split(" v ", 1)]
+        candidates.append((h, a))
     else:
-        # Fallback: split args in half
-        mid = len(args) // 2 or 1
-        home_q = " ".join(args[:mid]).lower()
-        away_q = " ".join(args[mid:]).lower()
+        # Try all reasonable splits, prefer ones with more even token counts
+        for i in range(1, len(args)):
+            candidates.append((" ".join(args[:i]).lower(), " ".join(args[i:]).lower()))
 
-    # Search DB for an upcoming or recent match where both team names contain the queries
-    with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT m.id, m.kickoff_utc, m.status, m.home_team_id, m.away_team_id,
-                   h.name AS home_name, a.name AS away_name, l.name AS league
-              FROM matches m
-              JOIN teams h ON m.home_team_id = h.id
-              JOIN teams a ON m.away_team_id = a.id
-              JOIN leagues l ON m.league_id = l.id
-             WHERE LOWER(h.name) LIKE ? AND LOWER(a.name) LIKE ?
-             ORDER BY m.kickoff_utc DESC LIMIT 5
-            """,
-            (f"%{home_q}%", f"%{away_q}%"),
-        ).fetchall()
-
-    if not rows:
-        # Try swapping order (user might have given them backwards)
+    rows: list = []
+    matched_query: tuple[str, str] | None = None
+    for home_q, away_q in candidates:
         with get_conn() as conn:
-            rows = conn.execute(
+            r = conn.execute(
                 """
                 SELECT m.id, m.kickoff_utc, m.status, m.home_team_id, m.away_team_id,
                        h.name AS home_name, a.name AS away_name, l.name AS league
@@ -443,19 +435,51 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                  WHERE LOWER(h.name) LIKE ? AND LOWER(a.name) LIKE ?
                  ORDER BY m.kickoff_utc DESC LIMIT 5
                 """,
-                (f"%{away_q}%", f"%{home_q}%"),
+                (f"%{home_q}%", f"%{away_q}%"),
             ).fetchall()
-        if rows:
+        if r:
+            rows = r
+            matched_query = (home_q, away_q)
+            break
+
+    # Track the original query split (for fallbacks below)
+    home_q, away_q = matched_query if matched_query else (full, full)
+
+    if not rows:
+        # Try every split with home/away swapped (user may have given them backwards)
+        for hq, aq in candidates:
+            with get_conn() as conn:
+                r = conn.execute(
+                    """
+                    SELECT m.id, m.kickoff_utc, m.status, m.home_team_id, m.away_team_id,
+                           h.name AS home_name, a.name AS away_name, l.name AS league
+                      FROM matches m
+                      JOIN teams h ON m.home_team_id = h.id
+                      JOIN teams a ON m.away_team_id = a.id
+                      JOIN leagues l ON m.league_id = l.id
+                     WHERE LOWER(h.name) LIKE ? AND LOWER(a.name) LIKE ?
+                     ORDER BY m.kickoff_utc DESC LIMIT 5
+                    """,
+                    (f"%{aq}%", f"%{hq}%"),
+                ).fetchall()
+            if r:
+                # Use it but tell the user the order is inverted
+                rows = r
+                await update.message.reply_text(
+                    "<i>(Invertí el orden — el partido está como visitante/local opuesto a lo que escribiste.)</i>",
+                    parse_mode=ParseMode.HTML,
+                )
+                break
+
+        if not rows:
             await update.message.reply_text(
-                f"No encontré <b>{home_q}</b> de local. ¿Quisiste decir al revés? Probá invertir el orden.",
+                f"No encontré ningún partido con esos nombres. "
+                f"Probá nombres más completos, o usá explícitamente <code>vs</code>: "
+                f"<code>/analizar Once Caldas vs Atlético Nacional</code>\n\n"
+                f"También podés correr /picks para ver qué partidos tenemos.",
                 parse_mode=ParseMode.HTML,
             )
             return
-        await update.message.reply_text(
-            f"No encontré ningún partido con '{home_q}' vs '{away_q}'. "
-            "Probá nombres más completos o corré /picks para ver qué tenemos.",
-        )
-        return
 
     # If multiple matches: pick the closest to today (most recent or earliest upcoming)
     target = rows[0]  # already ordered
