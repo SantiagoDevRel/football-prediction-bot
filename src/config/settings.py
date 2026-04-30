@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     paper_bankroll_initial: float = 1_000_000.0
     kelly_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     min_edge: float = Field(default=0.05, ge=0.0, le=1.0)
+    # Edges above this are almost always model errors, not real market value.
+    # Filter them out automatically so we don't bet "too good to be true" picks.
+    max_edge: float = Field(default=0.30, ge=0.0, le=1.0)
     min_confidence: float = Field(default=0.60, ge=0.0, le=1.0)
 
     # Storage

@@ -65,11 +65,20 @@ def detect_value(
     odds_lines: list[OddsLine],
     bankroll: float,
     min_edge: float | None = None,
+    max_edge: float | None = None,
     min_confidence: float | None = None,
     kelly_fraction: float | None = None,
 ) -> list[ValueBet]:
-    """Scan all (market, selection) combinations and return value bets above threshold."""
+    """Scan all (market, selection) combinations and return value bets above threshold.
+
+    Filters:
+      - edge in [min_edge, max_edge]: above max_edge (default 30%) it's almost
+        always model error, not real market value. Skip.
+      - probability in (2%, 98%): extremes are noise.
+      - odds in (1.10, 20.00): outside this range markets are too thin to trust.
+    """
     min_edge = settings.min_edge if min_edge is None else min_edge
+    max_edge = settings.max_edge if max_edge is None else max_edge
     min_confidence = settings.min_confidence if min_confidence is None else min_confidence
     kelly_fraction = settings.kelly_fraction if kelly_fraction is None else kelly_fraction
 
@@ -83,7 +92,7 @@ def detect_value(
         if not (0.02 < prob < 0.98):
             continue
         e = edge_fn(line.odds, prob)
-        if e < min_edge:
+        if e < min_edge or e > max_edge:
             continue
         if prediction.confidence is not None and prediction.confidence < min_confidence:
             continue

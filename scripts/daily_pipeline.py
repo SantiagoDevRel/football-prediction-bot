@@ -149,6 +149,134 @@ def _ensemble_predict(models: dict, home_id: int, away_id: int):
     return avg, probs
 
 
+# ---------- Telegram message formatting ----------
+
+_DAYS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+_MONTHS_ES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+
+
+def _humanize_kickoff(iso: str) -> str:
+    """'2026-05-02T16:30' -> 'sábado 16:30 (02 may)'."""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return iso[:16].replace("T", " ")
+    today = date.today()
+    diff_days = (dt.date() - today).days
+    if diff_days == 0:
+        when = "HOY"
+    elif diff_days == 1:
+        when = "MAÑANA"
+    else:
+        when = _DAYS_ES[dt.weekday()]
+    fecha = f"{dt.day:02d} {_MONTHS_ES[dt.month - 1]}"
+    return f"{when} {dt.strftime('%H:%M')} <i>({fecha})</i>"
+
+
+def _humanize_pick(vb: dict) -> tuple[str, str]:
+    """Return (action_line, why_line) for a value bet. Spanish and friendly."""
+    market, selection = vb["market"], vb["selection"]
+    home, away = vb["home_team"], vb["away_team"]
+
+    if market == "1x2":
+        if selection == "home":
+            action = f"<b>Gana {home}</b>"
+        elif selection == "away":
+            action = f"<b>Gana {away}</b> (visitante)"
+        else:
+            action = "<b>Empate</b> (X)"
+    elif market == "ou_2.5":
+        action = "<b>Más de 2.5 goles</b>" if selection == "over" else "<b>Menos de 2.5 goles</b>"
+    elif market == "btts":
+        action = "<b>Ambos equipos marcan</b>" if selection == "yes" else "<b>NO marcan los dos</b>"
+    else:
+        action = f"<b>{market}:{selection}</b>"
+
+    model_prob = vb["model_probability"]
+    fair_odds = vb["fair_odds"]
+    casa_odds = vb["odds"]
+    edge = vb["edge"]
+    casa_implied = 1.0 / casa_odds  # implied prob from the bookie odds
+
+    # Why: tell the math in plain terms
+    why = (
+        f"Modelo: {model_prob:.0%} probabilidad. "
+        f"Wplay paga {casa_odds:.2f} (lo cual sería justo si fuera {casa_implied:.0%}). "
+        f"Edge: <b>+{edge*100:.0f}%</b> sobre el mercado."
+    )
+    return action, why
+
+
+def _format_telegram_message(
+    predictions: list,
+    picks: list,
+    bankroll: float,
+    wplay_odds: list,
+) -> str:
+    """Compose the Telegram daily message: actionable picks first, summary at bottom."""
+    today_str = datetime.now().strftime("%a %d %b").lower()
+    header = (
+        f"<b>🎯 Picks del día</b> · {today_str}\n"
+        f"<i>Bankroll paper: ${bankroll:,.0f} COP</i>"
+    )
+
+    if not predictions:
+        return f"{header}\n\nNo hay partidos próximos en los próximos 2 días."
+
+    # If no value bets: short, encouraging
+    if not picks:
+        if not wplay_odds:
+            tail = (
+                "\n\n<i>⚠️ No pude leer cuotas de Wplay esta vez. "
+                "Las predicciones quedaron logueadas, pero no hay análisis de value.</i>"
+            )
+        else:
+            tail = (
+                "\n\nMiré <b>{npred} partidos</b> en Premier y Liga BetPlay y "
+                "<b>ninguna cuota de Wplay tiene value real</b> sobre el modelo. "
+                "Las casas están bien calibradas hoy. Mejor no apostar."
+                "\n\n<i>Esto es lo correcto cuando no hay edge — no apostar es ganar.</i>"
+            ).format(npred=len(predictions))
+        return header + tail
+
+    # Otherwise: actionable picks
+    parts = [header, ""]
+    parts.append(f"<b>📍 {len(picks)} apuesta(s) recomendada(s):</b>")
+    parts.append("")
+
+    for i, vb in enumerate(picks, start=1):
+        league_short = "Premier" if "Premier" in vb["league"] else "BetPlay"
+        action, why = _humanize_pick(vb)
+        # Find kickoff from predictions list
+        kickoff_iso = next((p["kickoff"] for p in predictions if p["match_id"] == vb["match_id"]), "")
+        when = _humanize_kickoff(kickoff_iso) if kickoff_iso else ""
+
+        parts.append("━━━━━━━━━━━━━━━━━━━━")
+        parts.append(f"<b>{i}. {vb['home_team']} vs {vb['away_team']}</b>")
+        parts.append(f"<i>{league_short} · {when}</i>")
+        parts.append("")
+        parts.append(f"➤ Apostá: {action}")
+        parts.append(f"💰 Cuota Wplay: <b>{vb['odds']:.2f}</b>")
+        parts.append(f"💵 Stake: <b>${vb['recommended_stake']:,.0f} COP</b> <i>(¼ Kelly)</i>")
+        parts.append("")
+        parts.append(f"<i>🧠 {why}</i>")
+        parts.append("")
+
+    parts.append("━━━━━━━━━━━━━━━━━━━━")
+    parts.append("")
+    parts.append(
+        "<i>⚠️ Modo paper trading. No apuestes plata real "
+        "hasta tener 100+ picks con CLV positivo.</i>"
+    )
+    parts.append("")
+    parts.append(
+        f"<i>Analizados: {len(predictions)} partidos. "
+        f"Filtros: edge entre 5% y 30%.</i>"
+    )
+
+    return "\n".join(parts)
+
+
 async def main() -> None:
     logger.info("=== Daily pipeline starting ===")
     logger.info(f"Mode: {settings.betting_mode} | bankroll target: paper")
@@ -260,43 +388,7 @@ async def main() -> None:
         logger.info("no Wplay odds — skipping value detection. predictions logged only.")
 
     # 7. Compose Telegram summary
-    if not predictions_summary:
-        msg = (
-            f"<b>📊 Daily pipeline report</b>\n"
-            f"{datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-            f"No upcoming matches in the next 2 days for our leagues."
-        )
-    else:
-        lines = [
-            f"<b>📊 Daily picks ({datetime.now().strftime('%Y-%m-%d')})</b>",
-            f"<i>Mode: {settings.betting_mode} | Bankroll: ${bankroll:,.0f}</i>",
-            f"<i>{len(predictions_summary)} predictions | {len(picks_made)} value bets detected</i>",
-            "",
-        ]
-        if picks_made:
-            lines.append("<b>⭐ VALUE BETS</b>")
-            for vb in picks_made:
-                short_league = "EPL" if "Premier" in vb["league"] else "BetPlay"
-                lines.append(
-                    f"<b>[{short_league}] {vb['home_team']} vs {vb['away_team']}</b>\n"
-                    f"  {vb['market']}:{vb['selection']} @ Wplay <b>{vb['odds']:.2f}</b>  "
-                    f"(model: {vb['model_probability']:.0%}, fair: {vb['fair_odds']:.2f})\n"
-                    f"  <b>edge +{vb['edge']*100:.1f}%</b> · stake ¼K: ${vb['recommended_stake']:,.0f}"
-                )
-            lines.append("")
-        lines.append("<b>📋 All predictions</b>")
-        for p in predictions_summary[:15]:
-            kickoff = p["kickoff"][:16].replace("T", " ")
-            league_short = "EPL" if "Premier" in p["league"] else "BetPlay"
-            lines.append(
-                f"<b>[{league_short} · {kickoff}]</b>\n"
-                f"  {p['home']} vs {p['away']}\n"
-                f"  <code>1X2: {p['p_home']:.0%} / {p['p_draw']:.0%} / {p['p_away']:.0%}</code>\n"
-                f"  <code>O2.5: {p['p_over_2_5']:.0%}  BTTS: {p['p_btts']:.0%}  xG: {p['xG_h']:.1f}-{p['xG_a']:.1f}</code>"
-            )
-        if len(predictions_summary) > 15:
-            lines.append(f"\n... +{len(predictions_summary) - 15} more")
-        msg = "\n".join(lines)
+    msg = _format_telegram_message(predictions_summary, picks_made, bankroll, wplay_odds)
 
     await send_message(msg)
     logger.info("=== Daily pipeline done ===")
