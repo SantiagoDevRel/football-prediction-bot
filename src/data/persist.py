@@ -212,3 +212,68 @@ def bulk_upsert_historical(matches: list[HistoricalMatch]) -> int:
             n += 1
     logger.info(f"upserted {n} historical matches into DB")
     return n
+
+
+def _normalize_team_name(name: str) -> str:
+    """Aggressive normalization for cross-source matching (ESPN ↔ Understat ↔ Wplay).
+    Strips diacritics, common suffixes, generic words, and trailing 'united'/
+    'city'/'hotspur' style decorations that vary across providers.
+    """
+    import re as _re
+    import unicodedata
+    s = unicodedata.normalize("NFKD", name)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower().strip()
+    # Drop generic prefixes/suffixes that providers add inconsistently:
+    s = _re.sub(r"\b(fc|cd|sc|cf|cdf|afc|de|football|club)\b", "", s)
+    # Drop nickname suffixes that one provider uses and another doesn't:
+    #   ESPN says "Tottenham Hotspur"; Understat says "Tottenham"
+    #   ESPN says "Brighton & Hove Albion"; Understat says "Brighton"
+    #   ESPN says "Newcastle United"; Understat says "Newcastle"
+    #   ESPN says "Ipswich Town"; Understat says "Ipswich"
+    s = _re.sub(r"\b(hotspur|& hove albion|& hove|albion|wanderers|town|united)\b", "", s)
+    # Final whitespace cleanup
+    return _re.sub(r"\s+", " ", s).strip()
+
+
+def update_xg_from_understat(understat_matches: list) -> dict:
+    """For each UnderstatMatch, find the matching DB row by (date, home, away)
+    using fuzzy team-name matching. Update home_xg / away_xg columns.
+
+    Returns counts: {matched, missing, updated_xg}
+    """
+    matched = missing = updated_xg = 0
+    with get_conn() as conn:
+        # Pre-build a lookup of all teams in the DB by normalized name
+        team_rows = conn.execute("SELECT id, name FROM teams").fetchall()
+        norm_to_team_id = {_normalize_team_name(r["name"]): r["id"] for r in team_rows}
+
+        for u in understat_matches:
+            h_norm = _normalize_team_name(u.home_team)
+            a_norm = _normalize_team_name(u.away_team)
+            home_id = norm_to_team_id.get(h_norm)
+            away_id = norm_to_team_id.get(a_norm)
+            if home_id is None or away_id is None:
+                missing += 1
+                continue
+
+            row = conn.execute(
+                """
+                SELECT id FROM matches
+                 WHERE home_team_id = ? AND away_team_id = ?
+                   AND date(kickoff_utc) = date(?)
+                """,
+                (home_id, away_id, u.match_date.isoformat()),
+            ).fetchone()
+            if row is None:
+                missing += 1
+                continue
+            matched += 1
+            conn.execute(
+                "UPDATE matches SET home_xg = ?, away_xg = ? WHERE id = ?",
+                (float(u.home_xg), float(u.away_xg), row["id"]),
+            )
+            updated_xg += 1
+
+    logger.info(f"understat → DB: matched={matched} missing={missing} xG_updated={updated_xg}")
+    return {"matched": matched, "missing": missing, "updated_xg": updated_xg}
