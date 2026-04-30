@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # Optional: the-odds-api.com key for multi-bookmaker comparison.
+    # Without this, the system runs Wplay-only (still functional).
+    odds_api_key: str = ""
 
     # Operation mode
     betting_mode: Literal["paper", "real"] = "paper"

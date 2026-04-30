@@ -28,6 +28,7 @@ from src.betting.value_detector import detect_value, OddsLine  # noqa: E402
 from src.config import settings  # noqa: E402
 from src.data.espn import fetch_scoreboard  # noqa: E402
 from src.data.persist import bulk_upsert_espn, get_conn  # noqa: E402
+from src.data.odds_api import fetch_multi_bookie_odds  # noqa: E402
 from src.data.wplay_scraper import (  # noqa: E402
     WplayOdds,
     normalize_name,
@@ -438,16 +439,40 @@ async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
     except Exception as exc:
         logger.warning(f"Wplay multi-market scrape failed: {exc}")
 
+    # Multi-bookmaker odds (optional, requires ODDS_API_KEY).
+    # We merge into the same odds_by_match index, keeping the BEST price
+    # available per (market, selection) across all sources.
+    odds_api_data: list = []
+    if settings.odds_api_key:
+        for slug in LEAGUES:
+            try:
+                rows = await fetch_multi_bookie_odds(slug, settings.odds_api_key)
+                odds_api_data.extend(rows)
+            except Exception as exc:
+                logger.warning(f"odds-api {slug} failed: {exc}")
+        logger.info(f"odds-api: {len(odds_api_data)} best-price rows")
+
     bankroll = get_current_bankroll("paper")
     candidates: list[dict] = []
-    if wplay_odds:
-        # Index by (norm_home, norm_away) -> { (market, selection): odds }
-        # NOTE: keyed on (market, selection) — not just selection — so that
-        # ou_1.5:over and ou_2.5:over don't collide.
+    if wplay_odds or odds_api_data:
+        # Index by (norm_home, norm_away) -> { (market, selection): (odds, source) }
+        # We keep the BEST price across all sources.
         odds_by_match: dict[tuple[str, str], dict[tuple[str, str], float]] = {}
+        odds_source: dict[tuple[str, str], dict[tuple[str, str], str]] = {}
+
+        def _add(key, market_sel, price, source):
+            existing = odds_by_match.setdefault(key, {})
+            cur = existing.get(market_sel)
+            if cur is None or price > cur:
+                existing[market_sel] = price
+                odds_source.setdefault(key, {})[market_sel] = source
+
         for o in wplay_odds:
             key = (normalize_name(o.home_team), normalize_name(o.away_team))
-            odds_by_match.setdefault(key, {})[(o.market, o.selection)] = o.odds
+            _add(key, (o.market, o.selection), o.odds, "wplay")
+        for o in odds_api_data:
+            key = (normalize_name(o.home_team), normalize_name(o.away_team))
+            _add(key, (o.market, o.selection), o.best_odds, o.best_bookmaker)
 
         for p in predictions_summary:
             key = (normalize_name(p["home"]), normalize_name(p["away"]))
@@ -455,8 +480,10 @@ async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
             if not casa:
                 continue
 
+            sources_for_match = odds_source.get(key, {})
             lines: list[OddsLine] = [
-                OddsLine(market, selection, odds, bookmaker="wplay")
+                OddsLine(market, selection, odds,
+                         bookmaker=sources_for_match.get((market, selection), "wplay"))
                 for (market, selection), odds in casa.items()
             ]
             value_bets = detect_value(
