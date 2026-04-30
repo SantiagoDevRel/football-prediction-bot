@@ -34,6 +34,7 @@ from src.data.wplay_scraper import (  # noqa: E402
     scrape_all_with_markets,
 )
 from src.notifications.telegram_bot import send_message  # noqa: E402
+from src.tracking.auto_resolver import auto_resolve_paper_picks  # noqa: E402
 from src.tracking.pick_logger import get_current_bankroll, log_pick  # noqa: E402
 
 LEAGUES = ["premier_league", "liga_betplay"]
@@ -425,6 +426,15 @@ async def main() -> None:
     """Cron entry point: runs core pipeline, auto-logs picks, sends Telegram summary."""
     logger.info("=== Daily pipeline starting ===")
     logger.info(f"Mode: {settings.betting_mode} | bankroll target: paper")
+
+    # Step 0: auto-resolve any picks whose match has finished since last run.
+    # Free side-effect — ensures bankroll is up-to-date before logging new picks.
+    try:
+        resolved = await auto_resolve_paper_picks()
+        if resolved:
+            logger.info(f"auto-resolved {len(resolved)} picks before today's pipeline")
+    except Exception as exc:
+        logger.warning(f"auto-resolver failed: {exc}")
 
     result = await run_pipeline_core(persist_predictions_flag=True)
     logger.info(

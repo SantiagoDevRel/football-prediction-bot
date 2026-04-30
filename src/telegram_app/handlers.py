@@ -356,6 +356,49 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
 
 
+# ---------- /resolver_auto ----------
+
+async def cmd_resolver_auto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually trigger auto-resolution. Useful right after a match ends so you don't
+    have to wait for the cron job."""
+    await update.message.reply_text(
+        "⏳ Refrescando ESPN y resolviendo picks finalizadas…",
+        parse_mode=ParseMode.HTML,
+    )
+    from src.tracking.auto_resolver import auto_resolve_paper_picks
+
+    resolved = await auto_resolve_paper_picks()
+    bankroll = get_current_bankroll("paper")
+    if not resolved:
+        await update.message.reply_text(
+            "<i>No hay picks listas para resolver (ningún partido terminó desde la última vez).</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    parts = [f"<b>✅ {len(resolved)} pick(s) resueltas</b>", ""]
+    for p in resolved:
+        market, sel = p["market"], p["selection"]
+        home, away = p["home_name"], p["away_name"]
+        score = f"{p['home_goals']}-{p['away_goals']}"
+        action = _humanize_action(market, sel, home, away)
+        icon = "🟢" if p["won"] else "🔴"
+        status = "GANADA" if p["won"] else "PERDIDA"
+        if p["won"]:
+            net = float(p["stake"]) * (float(p["odds_taken"]) - 1)
+        else:
+            net = -float(p["stake"])
+        parts.append(
+            f"{icon} <b>Pick #{p['id']} {status}</b>\n"
+            f"  {home} {score} {away}\n"
+            f"  <i>{action} @ {p['odds_taken']:.2f} · stake ${p['stake']:,.0f} · "
+            f"P&amp;L ${net:+,.0f}</i>"
+        )
+    parts.append("")
+    parts.append(f"<b>Bankroll:</b> ${bankroll:,.0f}")
+    await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
+
+
 # ---------- /historial ----------
 
 async def cmd_historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

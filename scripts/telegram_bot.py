@@ -27,6 +27,7 @@ from src.telegram_app.handlers import (  # noqa: E402
     cmd_historial,
     cmd_picks,
     cmd_resolver,
+    cmd_resolver_auto,
     cmd_start,
 )
 
@@ -44,6 +45,7 @@ def main() -> None:
     app.add_handler(CommandHandler("picks", cmd_picks))
     app.add_handler(CommandHandler("aposte", cmd_aposte))
     app.add_handler(CommandHandler("resolver", cmd_resolver))
+    app.add_handler(CommandHandler("resolver_auto", cmd_resolver_auto))
     app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CommandHandler("historial", cmd_historial))
     app.add_handler(CommandHandler("analizar", cmd_analizar))
