@@ -1,0 +1,50 @@
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=ROOT_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # API keys
+    # ESPN public scoreboard requires no auth → no key here
+    # football-data.co.uk CSVs are public → no key here
+    anthropic_api_key: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
+    # Operation mode
+    betting_mode: Literal["paper", "real"] = "paper"
+
+    # Bankroll & risk
+    paper_bankroll_initial: float = 1_000_000.0
+    kelly_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
+    min_edge: float = Field(default=0.05, ge=0.0, le=1.0)
+    min_confidence: float = Field(default=0.60, ge=0.0, le=1.0)
+
+    # Storage
+    database_url: str = f"sqlite:///{ROOT_DIR / 'data' / 'db' / 'football_bot.db'}"
+
+    # Logging
+    log_level: str = "INFO"
+
+    @property
+    def db_path(self) -> Path:
+        if self.database_url.startswith("sqlite:///"):
+            return Path(self.database_url.removeprefix("sqlite:///"))
+        raise ValueError("db_path only available for sqlite URLs")
+
+    @property
+    def is_paper_mode(self) -> bool:
+        return self.betting_mode == "paper"
+
+
+settings = Settings()
