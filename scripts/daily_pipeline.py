@@ -461,17 +461,22 @@ async def main() -> None:
         f"wplay_odds={result['wplay_odds_count']} value_candidates={len(result['value_bets'])}"
     )
 
-    # Cron auto-logs all candidates as paper picks
+    # Cron auto-logs all candidates as paper picks (skip ones rejected by risk mgmt)
     picks_made: list[dict] = []
+    rejected: list[str] = []
     for vb_dict in result["value_bets"]:
         from src.betting.value_detector import ValueBet
-        # Reconstruct ValueBet from flattened dict (drop kickoff which we added)
         vb_kwargs = {k: v for k, v in vb_dict.items() if k != "kickoff"}
         vb = ValueBet(**vb_kwargs)
-        pick_id = log_pick(vb, mode="paper")
-        picks_made.append({"pick_id": pick_id, **vb_dict})
+        try:
+            pick_id = log_pick(vb, mode="paper")
+            picks_made.append({"pick_id": pick_id, **vb_dict})
+        except ValueError as exc:
+            rejected.append(f"{vb.home_team} v {vb.away_team} {vb.market}:{vb.selection} ({exc})")
 
-    logger.info(f"value bets logged: {len(picks_made)}")
+    logger.info(f"value bets logged: {len(picks_made)} (rejected by risk: {len(rejected)})")
+    for r in rejected:
+        logger.info(f"  rejected: {r}")
 
     # 7. Compose Telegram summary
     msg = _format_telegram_message(

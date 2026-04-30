@@ -249,7 +249,17 @@ async def cmd_aposte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         recommended_stake=stake,
         reasoning=s.reasoning,
     )
-    pick_id = log_pick(vb, mode="paper")
+    try:
+        pick_id = log_pick(vb, mode="paper")
+    except ValueError as exc:
+        await update.message.reply_text(
+            f"⚠️ <b>Apuesta rechazada por gestión de riesgo</b>\n\n"
+            f"<i>{exc}</i>\n\n"
+            f"Para forzar (no recomendado), ajustá los límites en "
+            f"<code>src/betting/risk_manager.py</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
     bankroll = get_current_bankroll("paper")
     action = _humanize_action(s.market, s.selection, s.home_team, s.away_team)
     msg = (
@@ -318,9 +328,11 @@ async def cmd_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ---------- /balance ----------
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from src.betting.risk_manager import risk_summary
     chat_id = str(update.effective_chat.id)
     bankroll = get_current_bankroll("paper")
     metrics = compute_rolling_metrics("paper", days=30)
+    risk = risk_summary("paper")
 
     # Open picks (logged but not resolved)
     with get_conn() as conn:
@@ -339,6 +351,7 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "<b>💰 Tu balance</b>",
         "",
         f"<b>Bankroll:</b> ${bankroll:,.0f} COP",
+        f"<b>Pico histórico:</b> ${risk['peak']:,.0f} (drawdown {risk['drawdown_pct']*100:.1f}%)",
         f"<b>Picks abiertas:</b> {len(open_picks)}",
         "",
         "<b>Últimos 30 días:</b>",
@@ -346,6 +359,12 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"• Win rate: {metrics['win_rate']:.1%}",
         f"• ROI sobre stakes: {metrics['roi']:+.1%}",
         f"• P&L: ${metrics['total_pnl']:+,.0f}",
+        "",
+        "<b>Gestión de riesgo:</b>",
+        f"• Stakes hoy: ${risk['stakes_today']:,.0f} de ${risk['daily_remaining']:,.0f} restantes",
+        f"• Stop-loss: {'🔴 ACTIVO' if risk['stop_loss_active'] else '🟢 ok'} "
+        f"(drawdown threshold {risk['stop_loss_threshold']*100:.0f}%)",
+        f"• Pérdidas seguidas: {risk['consecutive_losses']} (cooldown a partir de {risk['cooldown_threshold']})",
     ]
     if open_picks:
         parts.append("")

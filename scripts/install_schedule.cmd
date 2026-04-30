@@ -35,6 +35,13 @@ schtasks /create /tn "FootballBotPersist" ^
   /f
 if errorlevel 1 echo WARNING: FootballBotPersist creation failed
 
+REM 4. Weekly retrain: Sundays 04:00 with auto-revert if regression
+schtasks /create /tn "FootballBotRetrain" ^
+  /tr "\"%REPO%\scripts\run_weekly_retrain.cmd\"" ^
+  /sc weekly /d SUN /st 04:00 ^
+  /f
+if errorlevel 1 echo WARNING: FootballBotRetrain creation failed
+
 echo.
 echo Tasks installed. List with: schtasks /query /tn FootballBotDaily
 echo Logs: %REPO%\logs\daily_*.log and %REPO%\logs\resolve_*.log

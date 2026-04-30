@@ -52,8 +52,19 @@ def get_current_bankroll(mode: PaperOrReal) -> float:
     return 0.0
 
 
-def log_pick(pick: ValueBet, mode: PaperOrReal = "paper") -> int:
-    """Insert a pick row + corresponding bankroll history row (stake out). Returns pick id."""
+def log_pick(pick: ValueBet, mode: PaperOrReal = "paper", *, bypass_risk_check: bool = False) -> int:
+    """Insert a pick row + corresponding bankroll history row (stake out). Returns pick id.
+
+    Risk-management gates are enforced unless bypass_risk_check=True (used by
+    auto-resolver test harness or admin overrides).
+    """
+    if not bypass_risk_check:
+        from src.betting.risk_manager import check_pick_allowed
+        check = check_pick_allowed(pick.recommended_stake, mode=mode)
+        if not check.allowed:
+            logger.warning(f"[risk] pick rejected: {check.reason}")
+            raise ValueError(f"risk check failed: {check.reason}")
+
     with get_conn() as conn:
         cur = conn.execute(
             """
