@@ -76,6 +76,19 @@ def train_for_league(league_name: str) -> None:
         print(f"  XGBoost fit failed: {exc}")
         xgb_model = None
 
+    # Train stacking ensemble (DC + Elo + XGBoost)
+    try:
+        from src.models.stacking import StackingEnsemble
+        stack = StackingEnsemble(base_models=[
+            DixonColes(xi=0.0019),
+            Elo(),
+            XGBoostModel(db_path=str(settings.db_path)),
+        ])
+        stack.fit(matches)
+    except Exception as exc:
+        print(f"  Stacking fit failed: {exc}")
+        stack = None
+
     # Print top 5 teams by attack (Dixon-Coles) and Elo
     teams_attack = sorted(
         ((dc.idx_to_team[i], dc.attack[i]) for i in range(len(dc.attack))),
@@ -106,7 +119,10 @@ def train_for_league(league_name: str) -> None:
     if xgb_model is not None:
         with open(ARTIFACTS_DIR / f"xgboost_{safe_slug}.pkl", "wb") as f:
             pickle.dump(xgb_model, f)
-    print(f"\n  saved -> {ARTIFACTS_DIR}/[dixon_coles|elo|xgboost]_{safe_slug}.pkl")
+    if stack is not None:
+        with open(ARTIFACTS_DIR / f"stacking_{safe_slug}.pkl", "wb") as f:
+            pickle.dump(stack, f)
+    print(f"\n  saved -> {ARTIFACTS_DIR}/[dixon_coles|elo|xgboost|stacking]_{safe_slug}.pkl")
 
 
 def main() -> None:

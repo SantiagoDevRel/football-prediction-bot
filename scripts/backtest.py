@@ -103,6 +103,13 @@ def evaluate(model_name: str, league_slug: str, train_end: date, test_from: date
         model = Elo()
     elif model_name == "xgboost":
         model = XGBoostModel(db_path=str(settings.db_path))
+    elif model_name == "stacking":
+        from src.models.stacking import StackingEnsemble
+        model = StackingEnsemble(base_models=[
+            DixonColes(xi=0.0019),
+            Elo(),
+            XGBoostModel(db_path=str(settings.db_path)),
+        ])
     else:
         raise ValueError(f"unknown model {model_name}")
 

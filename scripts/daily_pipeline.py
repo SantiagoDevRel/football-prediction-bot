@@ -48,14 +48,21 @@ def _model_path(model_name: str, league_slug: str) -> Path:
 
 
 def _load_models(league_slug: str) -> dict:
+    """Load all available models for a league.
+
+    Preference order at predict time:
+        1. Stacking (DC + Elo + XGBoost calibrated) — used by _ensemble_predict
+        2. If stacking missing, fall back to simple avg of DC + Elo
+    """
     out = {}
-    for name in ("dixon_coles", "elo"):
+    for name in ("dixon_coles", "elo", "xgboost", "stacking"):
         p = _model_path(name, league_slug)
         if p.exists():
-            with open(p, "rb") as f:
-                out[name] = pickle.load(f)
-        else:
-            logger.warning(f"model not found: {p}")
+            try:
+                with open(p, "rb") as f:
+                    out[name] = pickle.load(f)
+            except Exception as exc:
+                logger.warning(f"failed to load {name} for {league_slug}: {exc}")
     return out
 
 
@@ -124,9 +131,21 @@ def _league_slug_from_name(name: str) -> str:
 
 
 def _ensemble_predict(models: dict, home_id: int, away_id: int):
-    """Simple average of available models across all output markets."""
+    """If a stacking model is available, use it. Otherwise fall back to a
+    simple average of Dixon-Coles + Elo."""
+    if "stacking" in models:
+        try:
+            p = models["stacking"].predict_match(home_id, away_id)
+            return p, [p]
+        except KeyError:
+            return None
+        except Exception as exc:
+            logger.warning(f"stacking predict failed, falling back: {exc}")
+
+    # Fallback: average of available non-stacking models
+    fallback_models = {k: v for k, v in models.items() if k in ("dixon_coles", "elo")}
     probs = []
-    for name, m in models.items():
+    for name, m in fallback_models.items():
         try:
             p = m.predict_match(home_id, away_id)
             probs.append(p)
@@ -145,7 +164,7 @@ def _ensemble_predict(models: dict, home_id: int, away_id: int):
         "expected_home_goals", "expected_away_goals",
     ]
     avg_kwargs = {f: sum(getattr(p, f) for p in probs) / n for f in fields}
-    avg = type(probs[0])(features={"models_used": list(models.keys())}, **avg_kwargs)
+    avg = type(probs[0])(features={"models_used": list(fallback_models.keys())}, **avg_kwargs)
     return avg, probs
 
 
