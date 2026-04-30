@@ -167,6 +167,73 @@ async def fetch_scoreboard(
     return matches
 
 
+async def fetch_match_summary(league_slug: str, event_id: str) -> dict | None:
+    """ESPN's /summary endpoint returns boxscore stats: cards, corners,
+    fouls, shots, possession per team. Used to backfill match_stats table.
+
+    Returns dict with home_*/away_* keys for each metric, or None on failure.
+    """
+    league_code = ESPN_LEAGUE_BY_SLUG.get(league_slug)
+    if not league_code:
+        return None
+    url = f"{ESPN_BASE}/{league_code}/summary"
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"}) as client:
+            resp = await client.get(url, params={"event": event_id})
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as exc:
+        logger.warning(f"ESPN summary {event_id} failed: {exc}")
+        return None
+
+    teams = (data.get("boxscore") or {}).get("teams") or []
+    if len(teams) < 2:
+        return None
+
+    def stats_dict(team_block: dict) -> dict[str, str]:
+        return {
+            s["name"]: s.get("displayValue", "")
+            for s in team_block.get("statistics", []) if isinstance(s, dict)
+        }
+
+    def home_or_away(t: dict) -> str:
+        return t.get("homeAway", "")
+
+    home_block = next((t for t in teams if home_or_away(t) == "home"), teams[0])
+    away_block = next((t for t in teams if home_or_away(t) == "away"), teams[1])
+    home_stats = stats_dict(home_block)
+    away_stats = stats_dict(away_block)
+
+    def safe_int(s: str) -> int | None:
+        try:
+            return int(float(s)) if s not in ("", None) else None
+        except (TypeError, ValueError):
+            return None
+
+    def safe_float(s: str) -> float | None:
+        try:
+            return float(s) if s not in ("", None) else None
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "home_yellow_cards": safe_int(home_stats.get("yellowCards", "")),
+        "away_yellow_cards": safe_int(away_stats.get("yellowCards", "")),
+        "home_red_cards":    safe_int(home_stats.get("redCards", "")),
+        "away_red_cards":    safe_int(away_stats.get("redCards", "")),
+        "home_corners":      safe_int(home_stats.get("wonCorners", "")),
+        "away_corners":      safe_int(away_stats.get("wonCorners", "")),
+        "home_fouls":        safe_int(home_stats.get("foulsCommitted", "")),
+        "away_fouls":        safe_int(away_stats.get("foulsCommitted", "")),
+        "home_shots":        safe_int(home_stats.get("totalShots", "")),
+        "away_shots":        safe_int(away_stats.get("totalShots", "")),
+        "home_shots_on_target": safe_int(home_stats.get("shotsOnTarget", "")),
+        "away_shots_on_target": safe_int(away_stats.get("shotsOnTarget", "")),
+        "home_possession":   safe_float(home_stats.get("possessionPct", "")),
+        "away_possession":   safe_float(away_stats.get("possessionPct", "")),
+    }
+
+
 async def fetch_season_history(
     league_slug: str, season_start: date, season_end: date, request_delay_s: float = 0.15
 ) -> list[ESPNMatch]:

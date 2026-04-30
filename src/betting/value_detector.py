@@ -61,6 +61,16 @@ def _select_prob(prediction: MatchProbabilities, market: str, selection: str) ->
     if market == "ah_-1.5":
         return {"home": prediction.p_home_minus_1_5,
                 "away": prediction.p_away_plus_1_5}.get(selection)
+    # Cards / corners: probabilities live in prediction.features dict
+    # ({"cards_over_4.5": 0.62, "corners_over_9.5": 0.55, ...})
+    feat = (prediction.features or {})
+    if market.startswith("cards_") or market.startswith("corners_"):
+        line = market.split("_", 1)[1]
+        if selection == "over":
+            return feat.get(f"{market}_over") or feat.get(f"{market}")
+        if selection == "under":
+            v = feat.get(f"{market}_over") or feat.get(f"{market}")
+            return None if v is None else (1.0 - v)
     return None
 
 

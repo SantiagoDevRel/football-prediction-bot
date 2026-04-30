@@ -130,25 +130,65 @@ def _league_slug_from_name(name: str) -> str:
     return "liga_betplay"
 
 
+_CARDS_CORNERS_MODELS: dict[str, dict] = {}
+
+
+def _get_cards_corners_models(db_path: str) -> dict:
+    """Cache the cards + corners models in-process so we don't re-fit per match."""
+    if _CARDS_CORNERS_MODELS:
+        return _CARDS_CORNERS_MODELS
+    try:
+        from src.models.cards_corners import CardsOrCornersModel
+        cm = CardsOrCornersModel(db_path, kind="cards")
+        cm.fit(None)
+        co = CardsOrCornersModel(db_path, kind="corners")
+        co.fit(None)
+        _CARDS_CORNERS_MODELS["cards"] = cm
+        _CARDS_CORNERS_MODELS["corners"] = co
+    except Exception as exc:
+        logger.warning(f"cards/corners models init failed: {exc}")
+    return _CARDS_CORNERS_MODELS
+
+
+def _attach_cards_corners(prediction, home_id: int, away_id: int) -> None:
+    """Mutate prediction.features to include over/under prob for cards & corners
+    half-lines, so value_detector picks them up via market='cards_X.5' / 'corners_X.5'."""
+    cc = _get_cards_corners_models(str(settings.db_path))
+    for kind, model in cc.items():
+        try:
+            lam = model.expected_total(home_id, away_id)
+            lines = model.predict_over_lines(home_id, away_id)
+        except Exception:
+            continue
+        prediction.features[f"{kind}_lambda"] = lam
+        for line, p_over in lines.items():
+            prediction.features[f"{kind}_{line}_over"] = p_over
+
+
 def _ensemble_predict(models: dict, home_id: int, away_id: int, match_id: int | None = None):
     """If a stacking model is available, use it. Otherwise fall back to a
-    simple average of Dixon-Coles + Elo."""
+    simple average of Dixon-Coles + Elo. Always attaches cards/corners
+    predictions to features dict."""
+    p = None
     if "stacking" in models:
         try:
             p = models["stacking"].predict_match(home_id, away_id, match_id=match_id)
-            return p, [p]
         except KeyError:
             return None
         except Exception as exc:
             logger.warning(f"stacking predict failed, falling back: {exc}")
+
+    if p is not None:
+        _attach_cards_corners(p, home_id, away_id)
+        return p, [p]
 
     # Fallback: average of available non-stacking models
     fallback_models = {k: v for k, v in models.items() if k in ("dixon_coles", "elo")}
     probs = []
     for name, m in fallback_models.items():
         try:
-            p = m.predict_match(home_id, away_id)
-            probs.append(p)
+            p_one = m.predict_match(home_id, away_id)
+            probs.append(p_one)
         except KeyError:
             continue
     if not probs:
@@ -165,6 +205,7 @@ def _ensemble_predict(models: dict, home_id: int, away_id: int, match_id: int | 
     ]
     avg_kwargs = {f: sum(getattr(p, f) for p in probs) / n for f in fields}
     avg = type(probs[0])(features={"models_used": list(fallback_models.keys())}, **avg_kwargs)
+    _attach_cards_corners(avg, home_id, away_id)
     return avg, probs
 
 

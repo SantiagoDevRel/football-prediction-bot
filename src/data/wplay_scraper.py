@@ -324,7 +324,7 @@ async def scrape_match_markets(
         except Exception as exc:
             logger.warning(f"[match {event_id}] BTTS parse error: {exc}")
 
-        # O/U total goals: "Más de 1.5", "Menos de 1.5", "Más de 2.5", "Menos de 2.5", etc.
+        # O/U total goals: "Más de 1.5", "Menos de 1.5", etc.
         for line in (1.5, 2.5, 3.5):
             for sel, label in (("over", f"Más de {line}"), ("under", f"Menos de {line}")):
                 btn = await page.query_selector(f"button.price[title='{label}']")
@@ -339,6 +339,58 @@ async def scrape_match_markets(
                 out.append(WplayOdds(
                     league_slug=league_slug, home_team=home_team, away_team=away_team,
                     event_id=event_id, market=f"ou_{line}", selection=sel, odds=val,
+                    captured_at=captured_at,
+                ))
+
+        # Corners markets: "Tiros de Esquina - 3 Opciones (9)" with selections
+        # like "Más de 8" / "8 o 9" / "Menos de 10" — but we capture only the
+        # 3-way over/under at integer lines. Wplay also has direct OU lines
+        # at half integers via inline buttons titled "Más de 9.5", etc.
+        for line in (8.5, 9.5, 10.5, 11.5, 12.5):
+            for sel, label in (
+                ("over", f"Más de {line} Tiros de esquina"),
+                ("under", f"Menos de {line} Tiros de esquina"),
+                # Fallback short form sometimes used
+                ("over_alt", f"Más de {line}"),
+                ("under_alt", f"Menos de {line}"),
+            ):
+                if sel.endswith("_alt"):
+                    # Skip the short form — already handled by the goals OU loop above
+                    continue
+                btn = await page.query_selector(f"button.price[title='{label}']")
+                if btn is None:
+                    continue
+                dec = await btn.query_selector("span.price.dec")
+                if dec is None:
+                    continue
+                val = _safe_dec(await dec.inner_text())
+                if val is None:
+                    continue
+                out.append(WplayOdds(
+                    league_slug=league_slug, home_team=home_team, away_team=away_team,
+                    event_id=event_id, market=f"corners_{line}", selection=sel, odds=val,
+                    captured_at=captured_at,
+                ))
+
+        # Cards: "Más de 4.5 Tarjetas" / "Menos de 4.5 Tarjetas" — usually lazy-loaded
+        # but worth trying inline (some matches expose them).
+        for line in (3.5, 4.5, 5.5, 6.5):
+            for sel, label in (
+                ("over", f"Más de {line} Tarjetas"),
+                ("under", f"Menos de {line} Tarjetas"),
+            ):
+                btn = await page.query_selector(f"button.price[title='{label}']")
+                if btn is None:
+                    continue
+                dec = await btn.query_selector("span.price.dec")
+                if dec is None:
+                    continue
+                val = _safe_dec(await dec.inner_text())
+                if val is None:
+                    continue
+                out.append(WplayOdds(
+                    league_slug=league_slug, home_team=home_team, away_team=away_team,
+                    event_id=event_id, market=f"cards_{line}", selection=sel, odds=val,
                     captured_at=captured_at,
                 ))
 

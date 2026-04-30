@@ -59,6 +59,27 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_kickoff ON matches(kickoff_utc);
 CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
 
+-- Per-match boxscore stats (yellow/red cards, corners, fouls, shots)
+-- Backfilled from ESPN summary endpoint via scripts/backfill_boxscore.py.
+CREATE TABLE IF NOT EXISTS match_stats (
+    match_id          INTEGER PRIMARY KEY REFERENCES matches(id),
+    home_yellow_cards INTEGER,
+    away_yellow_cards INTEGER,
+    home_red_cards    INTEGER,
+    away_red_cards    INTEGER,
+    home_corners      INTEGER,
+    away_corners      INTEGER,
+    home_fouls        INTEGER,
+    away_fouls        INTEGER,
+    home_shots        INTEGER,
+    away_shots        INTEGER,
+    home_shots_on_target INTEGER,
+    away_shots_on_target INTEGER,
+    home_possession   REAL,
+    away_possession   REAL,
+    fetched_at        TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Odds snapshots (one row per snapshot per market per match per bookie)
 CREATE TABLE IF NOT EXISTS odds_snapshots (
     id            INTEGER PRIMARY KEY,
