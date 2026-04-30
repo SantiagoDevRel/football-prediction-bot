@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 from src.config import settings  # noqa: E402
 from src.models.dixon_coles import DixonColes  # noqa: E402
 from src.models.elo import Elo  # noqa: E402
+from src.models.xgboost_model import XGBoostModel  # noqa: E402
 
 
 LEAGUE_NAMES = {
@@ -53,7 +54,8 @@ def _load_matches(league_name: str, end: date | None = None) -> list[dict]:
     conn = sqlite3.connect(settings.db_path)
     conn.row_factory = sqlite3.Row
     sql = """
-        SELECT m.kickoff_utc, m.home_team_id, m.away_team_id, m.home_goals, m.away_goals
+        SELECT m.kickoff_utc, m.home_team_id, m.away_team_id, m.home_goals, m.away_goals,
+               m.league_id
           FROM matches m
           JOIN leagues l ON m.league_id = l.id
          WHERE l.name = ? AND m.status = 'finished'
@@ -72,6 +74,7 @@ def _load_matches(league_name: str, end: date | None = None) -> list[dict]:
             "away_team_id": r["away_team_id"],
             "home_goals": r["home_goals"],
             "away_goals": r["away_goals"],
+            "league_id": r["league_id"],
             "kickoff_date": date.fromisoformat(r["kickoff_utc"][:10]),
         }
         for r in rows
@@ -98,6 +101,8 @@ def evaluate(model_name: str, league_slug: str, train_end: date, test_from: date
         model = DixonColes(xi=0.0019)
     elif model_name == "elo":
         model = Elo()
+    elif model_name == "xgboost":
+        model = XGBoostModel(db_path=str(settings.db_path))
     else:
         raise ValueError(f"unknown model {model_name}")
 
@@ -113,7 +118,10 @@ def evaluate(model_name: str, league_slug: str, train_end: date, test_from: date
     # Realized 1X2 outcome encoded as 0=H,1=D,2=A
     for m in test_matches:
         try:
-            pred = model.predict_match(m["home_team_id"], m["away_team_id"])
+            pred = model.predict_match(
+                m["home_team_id"], m["away_team_id"],
+                kickoff_date=m["kickoff_date"], league_id=m.get("league_id"),
+            )
         except KeyError:
             # team not in training set — common for promoted teams. skip.
             continue

@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from src.config import settings  # noqa: E402
 from src.models.dixon_coles import DixonColes  # noqa: E402
 from src.models.elo import Elo  # noqa: E402
+from src.models.xgboost_model import XGBoostModel  # noqa: E402
 
 ARTIFACTS_DIR = ROOT / "models_artifacts"
 
@@ -24,7 +25,8 @@ def load_matches_for_league(league_name: str, exclude_after: date | None = None)
     conn = sqlite3.connect(settings.db_path)
     conn.row_factory = sqlite3.Row
     sql = """
-        SELECT m.kickoff_utc, m.home_team_id, m.away_team_id, m.home_goals, m.away_goals
+        SELECT m.kickoff_utc, m.home_team_id, m.away_team_id, m.home_goals, m.away_goals,
+               m.league_id
           FROM matches m
           JOIN leagues l ON m.league_id = l.id
          WHERE l.name = ? AND m.status = 'finished'
@@ -43,6 +45,7 @@ def load_matches_for_league(league_name: str, exclude_after: date | None = None)
             "away_team_id": r["away_team_id"],
             "home_goals": r["home_goals"],
             "away_goals": r["away_goals"],
+            "league_id": r["league_id"],
             "kickoff_date": date.fromisoformat(r["kickoff_utc"][:10]),
         }
         for r in rows
@@ -64,6 +67,14 @@ def train_for_league(league_name: str) -> None:
     # Train Elo
     elo = Elo()
     elo.fit(matches)
+
+    # Train XGBoost
+    try:
+        xgb_model = XGBoostModel(db_path=str(settings.db_path))
+        xgb_model.fit(matches)
+    except Exception as exc:
+        print(f"  XGBoost fit failed: {exc}")
+        xgb_model = None
 
     # Print top 5 teams by attack (Dixon-Coles) and Elo
     teams_attack = sorted(
@@ -92,7 +103,10 @@ def train_for_league(league_name: str) -> None:
         pickle.dump(dc, f)
     with open(ARTIFACTS_DIR / f"elo_{safe_slug}.pkl", "wb") as f:
         pickle.dump(elo, f)
-    print(f"\n  saved -> {ARTIFACTS_DIR}/[dixon_coles|elo]_{safe_slug}.pkl")
+    if xgb_model is not None:
+        with open(ARTIFACTS_DIR / f"xgboost_{safe_slug}.pkl", "wb") as f:
+            pickle.dump(xgb_model, f)
+    print(f"\n  saved -> {ARTIFACTS_DIR}/[dixon_coles|elo|xgboost]_{safe_slug}.pkl")
 
 
 def main() -> None:
