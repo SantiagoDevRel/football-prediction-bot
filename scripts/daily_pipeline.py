@@ -28,7 +28,11 @@ from src.betting.value_detector import detect_value, OddsLine  # noqa: E402
 from src.config import settings  # noqa: E402
 from src.data.espn import fetch_scoreboard  # noqa: E402
 from src.data.persist import bulk_upsert_espn, get_conn  # noqa: E402
-from src.data.wplay_scraper import scrape_live_odds  # noqa: E402
+from src.data.wplay_scraper import (  # noqa: E402
+    WplayOdds,
+    normalize_name,
+    scrape_all as scrape_wplay_all,
+)
 from src.notifications.telegram_bot import send_message  # noqa: E402
 from src.tracking.pick_logger import get_current_bankroll, log_pick  # noqa: E402
 
@@ -207,19 +211,51 @@ async def main() -> None:
     # 5. Try Wplay odds (best effort)
     wplay_odds: list = []
     try:
-        wplay_odds = await scrape_live_odds()
+        wplay_odds = await scrape_wplay_all()
         logger.info(f"Wplay odds captured: {len(wplay_odds)}")
     except Exception as exc:
         logger.warning(f"Wplay scrape failed: {exc}")
 
     # 6. Value detection - only if we have odds
     bankroll = get_current_bankroll("paper")
-    picks_made = 0
+    picks_made: list = []
     if wplay_odds:
-        # Match Wplay odds to predictions by team-name fuzzy match would go here.
-        # Currently the scraper returns []; once real selectors are in place,
-        # this branch becomes the live value-detection path.
-        logger.info("Wplay → predictions matching not yet implemented (selectors pending)")
+        # Build a lookup: (norm_home, norm_away) -> dict of selection -> odds
+        odds_by_match: dict[tuple[str, str], dict[str, float]] = {}
+        for o in wplay_odds:
+            key = (normalize_name(o.home_team), normalize_name(o.away_team))
+            odds_by_match.setdefault(key, {})[o.selection] = o.odds
+
+        # For each prediction, look up the matching Wplay row
+        for p in predictions_summary:
+            key = (normalize_name(p["home"]), normalize_name(p["away"]))
+            casa_odds = odds_by_match.get(key)
+            if not casa_odds:
+                # try swapping H/A in case ESPN/Wplay flipped them
+                key_swap = (normalize_name(p["away"]), normalize_name(p["home"]))
+                casa_odds = odds_by_match.get(key_swap)
+                if casa_odds:
+                    logger.warning(f"team order swapped between sources for {p['home']} vs {p['away']}; skipping")
+                continue
+
+            lines: list[OddsLine] = []
+            for sel in ("home", "draw", "away"):
+                if sel in casa_odds:
+                    lines.append(OddsLine("1x2", sel, casa_odds[sel], bookmaker="wplay"))
+
+            value_bets = detect_value(
+                match_id=p["match_id"],
+                home_team=p["home"],
+                away_team=p["away"],
+                league=p["league"],
+                prediction=p["ensemble"],
+                odds_lines=lines,
+                bankroll=bankroll,
+            )
+            for vb in value_bets:
+                pick_id = log_pick(vb, mode="paper")
+                picks_made.append({"pick_id": pick_id, **vb.__dict__})
+        logger.info(f"value bets logged: {len(picks_made)}")
     else:
         logger.info("no Wplay odds — skipping value detection. predictions logged only.")
 
@@ -234,9 +270,21 @@ async def main() -> None:
         lines = [
             f"<b>📊 Daily picks ({datetime.now().strftime('%Y-%m-%d')})</b>",
             f"<i>Mode: {settings.betting_mode} | Bankroll: ${bankroll:,.0f}</i>",
-            f"<i>{len(predictions_summary)} predictions | {picks_made} value bets detected</i>",
+            f"<i>{len(predictions_summary)} predictions | {len(picks_made)} value bets detected</i>",
             "",
         ]
+        if picks_made:
+            lines.append("<b>⭐ VALUE BETS</b>")
+            for vb in picks_made:
+                short_league = "EPL" if "Premier" in vb["league"] else "BetPlay"
+                lines.append(
+                    f"<b>[{short_league}] {vb['home_team']} vs {vb['away_team']}</b>\n"
+                    f"  {vb['market']}:{vb['selection']} @ Wplay <b>{vb['odds']:.2f}</b>  "
+                    f"(model: {vb['model_probability']:.0%}, fair: {vb['fair_odds']:.2f})\n"
+                    f"  <b>edge +{vb['edge']*100:.1f}%</b> · stake ¼K: ${vb['recommended_stake']:,.0f}"
+                )
+            lines.append("")
+        lines.append("<b>📋 All predictions</b>")
         for p in predictions_summary[:15]:
             kickoff = p["kickoff"][:16].replace("T", " ")
             league_short = "EPL" if "Premier" in p["league"] else "BetPlay"
@@ -248,10 +296,6 @@ async def main() -> None:
             )
         if len(predictions_summary) > 15:
             lines.append(f"\n... +{len(predictions_summary) - 15} more")
-        if not wplay_odds:
-            lines.append(
-                "\n<i>⚠️ Wplay scraper not yet wired — comparing manually for now.</i>"
-            )
         msg = "\n".join(lines)
 
     await send_message(msg)

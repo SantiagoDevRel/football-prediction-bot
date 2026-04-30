@@ -5,94 +5,93 @@ ARCHITECTURAL CONSTRAINT (do not change without explicit approval):
     credentials, or interacts with the betting form. Wplay's T&Cs prohibit
     automated betting -> account closure + balance forfeiture.
 
-Strategy: open Wplay football page in Playwright (headless Chromium), wait
-for JS to load match cards, intercept XHR responses where possible, and
-extract odds. Because Wplay's exact DOM/HTML can change without warning,
-this scraper is best-effort:
-    - If selectors break, we save raw HTML + screenshot to logs/wplay_debug/
-      and return an empty list rather than crashing the pipeline.
-    - The daily pipeline degrades gracefully when no odds are available
-      (it just logs predictions without a value-bet calculation).
+Architecture (validated 2026-04-30 from saved debug HTML):
+    Wplay runs on OpenBet/SBTech. The league page renders matches as
+    <tr class="mkt mkt_content mkt-{mkt_id}" data-mkt_id="{mkt_id}"> rows.
+    Each row contains 3 buttons (home / draw / away) with decimal odds in
+    <span class="price dec">VALUE</span>. Match URL slug carries team names.
 
-The scraper does NOT send credentials and does NOT navigate to user-account
-pages. It hits public live-odds pages only.
+League URLs:
+    Premier:  https://apuestas.wplay.co/es/t/19157/Inglaterra-Premier-League
+    BetPlay:  https://apuestas.wplay.co/es/t/19311/Colombia-Primera-A
 """
 from __future__ import annotations
 
 import asyncio
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote
 
 from loguru import logger
-from playwright.async_api import Browser, Page, async_playwright
-
-from src.config import settings
+from playwright.async_api import Page, async_playwright
 
 
-# NOTE: this URL returns a 404 (ERR_NOTFOUND) on Wplay's current site. Real
-# scraping requires:
-#   1. Identifying the correct landing URL (likely /es-co/sports/... or via
-#      logged-in session — Wplay restricts a lot of routes).
-#   2. Solving the geo gate (Wplay validates Colombian IP via GetIpInfo.php).
-#   3. Engineering selectors after manual inspection of the rendered DOM.
-#
-# This is selector engineering that needs human-in-the-loop iteration. The
-# scraper as-is opens the page, captures a debug snapshot, and returns []
-# so the rest of the pipeline can degrade gracefully.
-#
-# When iterating: run `python -m src.data.wplay_scraper`, inspect
-# logs/wplay_debug/_initial_capture.html in a browser, find the correct
-# selectors, and update WPLAY_FOOTBALL_URL + extraction below.
-WPLAY_FOOTBALL_URL = "https://apuestas.wplay.co/sports/futbol"
+WPLAY_LEAGUE_URLS: dict[str, str] = {
+    "premier_league": "https://apuestas.wplay.co/es/t/19157/Inglaterra-Premier-League",
+    "liga_betplay":   "https://apuestas.wplay.co/es/t/19311/Colombia-Primera-A",
+}
+
 DEBUG_DIR = Path(__file__).resolve().parents[2] / "logs" / "wplay_debug"
 
 
 @dataclass
 class WplayOdds:
+    league_slug: str
     home_team: str
     away_team: str
-    league_hint: str | None
-    market: str            # "1x2" | "ou_2.5" | "btts"
-    selection: str         # "home" | "draw" | "away" | "over" | "under" | "yes" | "no"
+    event_id: str
+    market: str           # "1x2"
+    selection: str        # "home" | "draw" | "away"
     odds: float
-    is_live: bool
     captured_at: datetime
 
 
-# A loose set of league name fragments we accept (case-insensitive substring match).
-_OUR_LEAGUES = ("premier", "england", "english", "betplay", "colombia", "primera a", "dimayor")
+# ---------- Normalization helpers ----------
+
+def normalize_name(name: str) -> str:
+    """Lowercase, strip accents, collapse whitespace, drop generic FC/CD/SC suffixes."""
+    s = unicodedata.normalize("NFKD", name)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower().strip()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\b(fc|cd|sc|cf|cdf|de|football|club)\b", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
-def _is_our_league(text: str | None) -> bool:
-    if not text:
-        return False
-    t = text.lower()
-    return any(frag in t for frag in _OUR_LEAGUES)
+_SLUG_TEAMS_RE = re.compile(r"^/es/e/(\d+)/(.+)$")
 
 
-async def _save_debug(page: Page, label: str) -> None:
-    """Persist HTML + screenshot for selector debugging."""
-    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
-    html_path = DEBUG_DIR / f"{ts}_{label}.html"
-    png_path = DEBUG_DIR / f"{ts}_{label}.png"
-    try:
-        html = await page.content()
-        html_path.write_text(html, encoding="utf-8")
-    except Exception as exc:
-        logger.warning(f"failed to save debug HTML: {exc}")
-    try:
-        await page.screenshot(path=str(png_path), full_page=True)
-    except Exception as exc:
-        logger.warning(f"failed to save debug screenshot: {exc}")
-    logger.info(f"saved Wplay debug -> {html_path.name}, {png_path.name}")
+def parse_event_url(href: str) -> tuple[str, str, str] | None:
+    """Parse '/es/e/30923707/Newcastle-v-Brighton' -> (event_id, home, away).
+
+    Some real slugs include URL-encoded whitespace at the start (\t\r\n) and
+    accented chars (e.g. %C3%A9). We URL-decode then strip control chars.
+    """
+    href = href.strip()
+    m = _SLUG_TEAMS_RE.match(href)
+    if not m:
+        return None
+    event_id = m.group(1)
+    slug = unquote(m.group(2))
+    # Strip URL-encoded leading whitespace artifacts (\t \r \n etc.)
+    slug = re.sub(r"^\s+", "", slug)
+    # Split on '-v-' (both sides padded with hyphens, since slug is hyphen-joined)
+    if "-v-" not in slug:
+        return None
+    home_slug, _, away_slug = slug.partition("-v-")
+    home = home_slug.replace("-", " ").strip()
+    away = away_slug.replace("-", " ").strip()
+    return event_id, home, away
 
 
-async def _open_browser() -> tuple[Browser, Page]:
+# ---------- Browser plumbing ----------
+
+async def _open_page() -> tuple[object, Page]:
     pw = await async_playwright().start()
-    # Stealth-lite: realistic UA, no automation flag, viewport like a desktop.
     browser = await pw.chromium.launch(
         headless=True,
         args=["--disable-blink-features=AutomationControlled"],
@@ -109,95 +108,159 @@ async def _open_browser() -> tuple[Browser, Page]:
     return browser, page
 
 
-async def scrape_live_odds(timeout_ms: int = 25_000) -> list[WplayOdds]:
-    """Open Wplay football page and try to extract live + upcoming match odds.
+async def _save_debug(page: Page, label: str) -> None:
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+    try:
+        (DEBUG_DIR / f"{ts}_{label}.html").write_text(await page.content(), encoding="utf-8")
+    except Exception as exc:
+        logger.warning(f"failed to save debug HTML: {exc}")
+    try:
+        await page.screenshot(path=str(DEBUG_DIR / f"{ts}_{label}.png"), full_page=True)
+    except Exception as exc:
+        logger.warning(f"failed to save debug screenshot: {exc}")
 
-    Best-effort. Returns empty list on selector failure rather than raising.
-    Always saves debug artifacts on first run so we can iterate selectors.
+
+# ---------- Extraction ----------
+
+_ODDS_RE = re.compile(r"^\s*(\d{1,2}\.\d{1,3})\s*$")
+
+
+async def _extract_from_page(page: Page, league_slug: str) -> list[WplayOdds]:
+    """Read all match rows currently in the DOM and emit WplayOdds.
+
+    The selector tr[data-mkt_id] matches one match. Inside we expect:
+      - <a href="/es/e/{event_id}/{slug}">  somewhere (in the mkt-count cell)
+      - 3 <td class="seln"> cells, each with a <button class="price">
+        containing <span class="price dec">{decimal_odds}</span>
     """
-    captured: list[WplayOdds] = []
-    browser, page = await _open_browser()
+    out: list[WplayOdds] = []
+    captured_at = datetime.now(tz=timezone.utc)
+
+    rows = await page.query_selector_all("tr[data-mkt_id]")
+    logger.info(f"[{league_slug}] found {len(rows)} mkt rows")
+
+    for row in rows:
+        mkt_id = await row.get_attribute("data-mkt_id")
+        if not mkt_id:
+            continue
+
+        # Event link
+        link = await row.query_selector("a[href*='/es/e/']")
+        if not link:
+            continue
+        href = (await link.get_attribute("href")) or ""
+        parsed = parse_event_url(href)
+        if not parsed:
+            continue
+        event_id, home_team, away_team = parsed
+
+        # 3 selection buttons in order: home, draw, away
+        buttons = await row.query_selector_all("td.seln button.price")
+        if len(buttons) < 3:
+            continue
+
+        selections = ("home", "draw", "away")
+        odds_for_row: list[tuple[str, float]] = []
+        for sel, btn in zip(selections, buttons[:3]):
+            # Decimal odds span inside the button
+            dec_span = await btn.query_selector("span.price.dec")
+            if dec_span is None:
+                continue
+            try:
+                txt = (await dec_span.inner_text()).strip()
+            except Exception:
+                continue
+            m = _ODDS_RE.match(txt)
+            if not m:
+                continue
+            try:
+                val = float(m.group(1))
+            except ValueError:
+                continue
+            if 1.01 <= val <= 200.0:
+                odds_for_row.append((sel, val))
+
+        if len(odds_for_row) < 3:
+            continue
+
+        for sel, val in odds_for_row:
+            out.append(WplayOdds(
+                league_slug=league_slug,
+                home_team=home_team,
+                away_team=away_team,
+                event_id=event_id,
+                market="1x2",
+                selection=sel,
+                odds=val,
+                captured_at=captured_at,
+            ))
+
+    return out
+
+
+async def scrape_league(league_slug: str, timeout_ms: int = 30_000) -> list[WplayOdds]:
+    """Open a Wplay league page and return all 1X2 odds.
+
+    Best-effort. Saves debug HTML+screenshot once on every run.
+    """
+    if league_slug not in WPLAY_LEAGUE_URLS:
+        raise ValueError(f"unknown league slug: {league_slug}")
+    url = WPLAY_LEAGUE_URLS[league_slug]
+
+    browser, page = await _open_page()
     try:
         try:
-            await page.goto(WPLAY_FOOTBALL_URL, wait_until="domcontentloaded", timeout=timeout_ms)
-            # Give SPA time to hydrate content
-            await page.wait_for_timeout(5_000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         except Exception as exc:
-            logger.warning(f"Wplay navigation failed: {exc}")
-            await _save_debug(page, "nav_failed")
+            logger.warning(f"Wplay nav {league_slug} failed: {exc}")
+            await _save_debug(page, f"{league_slug}_nav_failed")
             return []
 
-        # We don't know the exact selectors and they change. Try a few patterns:
-        # 1. Look for elements that contain decimal numbers consistent with odds (e.g. 1.85, 3.40)
-        # 2. Try common SPA patterns: match cards inside [data-testid*="event"]
-        # 3. Fall back to plain regex on the rendered text
-
+        # Wait for the match list to render. The real selector is the mkt
+        # row, not the football expander.
         try:
-            html = await page.content()
+            await page.wait_for_selector("tr[data-mkt_id]", timeout=15_000)
         except Exception:
-            html = ""
+            logger.warning(f"[{league_slug}] no mkt rows within 15s")
+            await _save_debug(page, f"{league_slug}_no_rows")
+            return []
 
-        # Save first-run debug regardless so we can build better selectors offline
-        if not (DEBUG_DIR / "_initial_capture.html").exists():
-            DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-            (DEBUG_DIR / "_initial_capture.html").write_text(html, encoding="utf-8")
-            try:
-                await page.screenshot(
-                    path=str(DEBUG_DIR / "_initial_capture.png"), full_page=True
-                )
-            except Exception:
-                pass
-            logger.info(
-                "saved initial Wplay capture to logs/wplay_debug/_initial_capture.html "
-                "for selector engineering"
-            )
+        # Settle: let ALL events render (the page may stream more via XHR)
+        await page.wait_for_timeout(2_000)
 
-        # Heuristic extraction: look for visible odds patterns next to team names.
-        # Wplay (like most casas) renders match cards with two team names and
-        # 3 odds (1, X, 2). We use Playwright's text-based extraction.
-        try:
-            # Find all elements containing a decimal number 1.01-99.99 (likely odds)
-            odds_re = re.compile(r"^\s*\d{1,2}\.\d{1,3}\s*$")
-            cells = await page.query_selector_all("button, span, div")
-            seen: set[str] = set()
-            for cell in cells[:5000]:  # cap to avoid hangs on huge DOM
-                try:
-                    text = (await cell.inner_text()).strip()
-                except Exception:
-                    continue
-                if odds_re.match(text):
-                    try:
-                        val = float(text)
-                    except ValueError:
-                        continue
-                    if 1.01 <= val <= 99.0:
-                        seen.add(text)
-            if not seen:
-                logger.warning("Wplay: no odds-shaped elements found")
-                await _save_debug(page, "no_odds_found")
-        except Exception as exc:
-            logger.warning(f"Wplay extraction failed: {exc}")
-            await _save_debug(page, "extraction_failed")
+        odds = await _extract_from_page(page, league_slug)
+        logger.info(f"[{league_slug}] extracted {len(odds)} price rows")
 
-        # Note: full mapping of odds to (home, away, market, selection) requires
-        # selector engineering specific to Wplay's current markup. Phase 2.5
-        # will iterate the debug HTML and produce concrete selectors. Until then
-        # we return an empty list and the daily pipeline operates without odds.
-        logger.info(
-            f"Wplay scrape complete (heuristic phase). odds-shaped tokens found: "
-            f"{len(seen) if 'seen' in locals() else 0}. Returning [] for now; "
-            f"selectors require human inspection of logs/wplay_debug/_initial_capture.html"
-        )
-        return captured
+        await _save_debug(page, f"{league_slug}_extracted")
+        return odds
     finally:
-        await browser.close()
+        try:
+            await browser.close()
+        except Exception:
+            pass
 
 
+async def scrape_all() -> list[WplayOdds]:
+    """Scrape both target leagues sequentially."""
+    out: list[WplayOdds] = []
+    for slug in WPLAY_LEAGUE_URLS:
+        out.extend(await scrape_league(slug))
+    return out
+
+
+# Smoke test
 async def _smoke() -> None:
-    items = await scrape_live_odds()
-    print(f"Wplay returned {len(items)} odds")
-    for o in items[:10]:
-        print(f"  {o.home_team} vs {o.away_team} | {o.market}:{o.selection} = {o.odds}")
+    items = await scrape_all()
+    print(f"\nWplay returned {len(items)} odds rows")
+    seen_matches: set[tuple[str, str]] = set()
+    for o in items:
+        if o.market == "1x2" and o.selection == "home":
+            seen_matches.add((o.home_team, o.away_team))
+    for o in items[:30]:
+        print(f"  [{o.league_slug:14}] {o.home_team[:25]:25} v {o.away_team[:25]:25}  "
+              f"{o.market}:{o.selection:5} = {o.odds:>6.2f}")
+    print(f"\nUnique matches with full 1X2: {len(seen_matches)}")
 
 
 if __name__ == "__main__":
