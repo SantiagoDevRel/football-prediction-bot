@@ -151,19 +151,29 @@ class Elo(Model):
 
         idx_i, idx_j = np.indices(sm.shape)
         tot = idx_i + idx_j
+        p_over_1_5 = float(sm[tot > 1].sum())
         p_over_2_5 = float(sm[tot > 2].sum())
-        p_under_2_5 = float(sm[tot <= 2].sum())
+        p_over_3_5 = float(sm[tot > 3].sum())
         p_btts_yes = float(sm[1:, 1:].sum())
         p_btts_no = float(1.0 - p_btts_yes)
+
+        margin = idx_i - idx_j
+        p_home_minus_1_5 = float(sm[margin >= 2].sum())
 
         return MatchProbabilities(
             p_home_win=p_home,
             p_draw=p_draw,
             p_away_win=p_away,
             p_over_2_5=p_over_2_5,
-            p_under_2_5=p_under_2_5,
+            p_under_2_5=float(1.0 - p_over_2_5),
+            p_over_1_5=p_over_1_5,
+            p_under_1_5=float(1.0 - p_over_1_5),
+            p_over_3_5=p_over_3_5,
+            p_under_3_5=float(1.0 - p_over_3_5),
             p_btts_yes=p_btts_yes,
             p_btts_no=p_btts_no,
+            p_home_minus_1_5=p_home_minus_1_5,
+            p_away_plus_1_5=float(1.0 - p_home_minus_1_5),
             expected_home_goals=home_g,
             expected_away_goals=away_g,
             features={"model": "elo", "rh": rh, "ra": ra, "diff": rating_diff},

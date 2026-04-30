@@ -46,12 +46,21 @@ def _select_prob(prediction: MatchProbabilities, market: str, selection: str) ->
         return {"home": prediction.p_home_win,
                 "draw": prediction.p_draw,
                 "away": prediction.p_away_win}.get(selection)
+    if market == "ou_1.5":
+        return {"over": prediction.p_over_1_5,
+                "under": prediction.p_under_1_5}.get(selection)
     if market == "ou_2.5":
         return {"over": prediction.p_over_2_5,
                 "under": prediction.p_under_2_5}.get(selection)
+    if market == "ou_3.5":
+        return {"over": prediction.p_over_3_5,
+                "under": prediction.p_under_3_5}.get(selection)
     if market == "btts":
         return {"yes": prediction.p_btts_yes,
                 "no": prediction.p_btts_no}.get(selection)
+    if market == "ah_-1.5":
+        return {"home": prediction.p_home_minus_1_5,
+                "away": prediction.p_away_plus_1_5}.get(selection)
     return None
 
 

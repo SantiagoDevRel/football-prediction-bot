@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     betting_mode: Literal["paper", "real"] = "paper"
 
     # Bankroll & risk
-    paper_bankroll_initial: float = 1_000_000.0
+    paper_bankroll_initial: float = 100_000.0
     kelly_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     min_edge: float = Field(default=0.05, ge=0.0, le=1.0)
     # Edges above this are almost always model errors, not real market value.

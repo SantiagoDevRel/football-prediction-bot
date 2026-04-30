@@ -194,24 +194,37 @@ class DixonColes(Model):
         p_draw = float(np.trace(sm))
         p_away = float(np.triu(sm, k=1).sum())    # j > i
 
-        # Over/Under 2.5: sum over i+j > 2 vs <= 2
+        # Over/Under various lines
         idx_i, idx_j = np.indices(sm.shape)
         total_goals = idx_i + idx_j
+        p_over_1_5 = float(sm[total_goals > 1].sum())
         p_over_2_5 = float(sm[total_goals > 2].sum())
-        p_under_2_5 = float(sm[total_goals <= 2].sum())
+        p_over_3_5 = float(sm[total_goals > 3].sum())
 
         # BTTS: both > 0 vs at least one == 0
         p_btts_yes = float(sm[1:, 1:].sum())
         p_btts_no = float(1.0 - p_btts_yes)
+
+        # European handicap -1.5 / +1.5 (no push)
+        # Home -1.5: home wins by 2 or more (i - j >= 2)
+        margin = idx_i - idx_j
+        p_home_minus_1_5 = float(sm[margin >= 2].sum())
+        p_away_plus_1_5 = float(1.0 - p_home_minus_1_5)
 
         return MatchProbabilities(
             p_home_win=p_home,
             p_draw=p_draw,
             p_away_win=p_away,
             p_over_2_5=p_over_2_5,
-            p_under_2_5=p_under_2_5,
+            p_under_2_5=float(1.0 - p_over_2_5),
+            p_over_1_5=p_over_1_5,
+            p_under_1_5=float(1.0 - p_over_1_5),
+            p_over_3_5=p_over_3_5,
+            p_under_3_5=float(1.0 - p_over_3_5),
             p_btts_yes=p_btts_yes,
             p_btts_no=p_btts_no,
+            p_home_minus_1_5=p_home_minus_1_5,
+            p_away_plus_1_5=p_away_plus_1_5,
             expected_home_goals=lam,
             expected_away_goals=mu,
             features={"model": "dixon_coles", "rho": self.rho, "home_adv": self.home_advantage},

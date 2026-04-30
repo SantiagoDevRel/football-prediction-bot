@@ -123,7 +123,7 @@ def _league_slug_from_name(name: str) -> str:
 
 
 def _ensemble_predict(models: dict, home_id: int, away_id: int):
-    """Simple average of available models. Replace with stacking ensemble in v2."""
+    """Simple average of available models across all output markets."""
     probs = []
     for name, m in models.items():
         try:
@@ -134,18 +134,17 @@ def _ensemble_predict(models: dict, home_id: int, away_id: int):
     if not probs:
         return None
     n = len(probs)
-    avg = type(probs[0])(
-        p_home_win=sum(p.p_home_win for p in probs) / n,
-        p_draw=sum(p.p_draw for p in probs) / n,
-        p_away_win=sum(p.p_away_win for p in probs) / n,
-        p_over_2_5=sum(p.p_over_2_5 for p in probs) / n,
-        p_under_2_5=sum(p.p_under_2_5 for p in probs) / n,
-        p_btts_yes=sum(p.p_btts_yes for p in probs) / n,
-        p_btts_no=sum(p.p_btts_no for p in probs) / n,
-        expected_home_goals=sum(p.expected_home_goals for p in probs) / n,
-        expected_away_goals=sum(p.expected_away_goals for p in probs) / n,
-        features={"models_used": list(models.keys())},
-    )
+    fields = [
+        "p_home_win", "p_draw", "p_away_win",
+        "p_over_1_5", "p_under_1_5",
+        "p_over_2_5", "p_under_2_5",
+        "p_over_3_5", "p_under_3_5",
+        "p_btts_yes", "p_btts_no",
+        "p_home_minus_1_5", "p_away_plus_1_5",
+        "expected_home_goals", "expected_away_goals",
+    ]
+    avg_kwargs = {f: sum(getattr(p, f) for p in probs) / n for f in fields}
+    avg = type(probs[0])(features={"models_used": list(models.keys())}, **avg_kwargs)
     return avg, probs
 
 
@@ -207,71 +206,105 @@ def _humanize_pick(vb: dict) -> tuple[str, str]:
     return action, why
 
 
+def _format_pick_block(vb: dict, predictions: list, idx: int) -> list[str]:
+    """Render one pick as a block of lines."""
+    league_short = "Premier" if "Premier" in vb["league"] else "BetPlay"
+    action, why = _humanize_pick(vb)
+    kickoff_iso = next(
+        (p["kickoff"] for p in predictions if p["match_id"] == vb["match_id"]), ""
+    )
+    when = _humanize_kickoff(kickoff_iso) if kickoff_iso else ""
+
+    return [
+        f"<b>#{idx} · {vb['home_team']} vs {vb['away_team']}</b>",
+        f"<i>{league_short} · {when}</i>",
+        "",
+        f"➤ Apostá: {action}",
+        f"💰 Cuota Wplay: <b>{vb['odds']:.2f}</b>",
+        f"💵 Stake: <b>${vb['recommended_stake']:,.0f} COP</b> <i>(¼ Kelly)</i>",
+        "",
+        f"<i>🧠 {why}</i>",
+        "",
+    ]
+
+
 def _format_telegram_message(
     predictions: list,
     picks: list,
     bankroll: float,
     wplay_odds: list,
 ) -> str:
-    """Compose the Telegram daily message: actionable picks first, summary at bottom."""
+    """Compose the Telegram message: split picks into safe (low odds) vs risky (high odds)."""
     today_str = datetime.now().strftime("%a %d %b").lower()
-    header = (
-        f"<b>🎯 Picks del día</b> · {today_str}\n"
-        f"<i>Bankroll paper: ${bankroll:,.0f} COP</i>"
-    )
+    header_lines = [
+        f"<b>🎯 Picks del día</b> · {today_str}",
+        f"<i>Bankroll paper: ${bankroll:,.0f} COP</i>",
+    ]
 
     if not predictions:
-        return f"{header}\n\nNo hay partidos próximos en los próximos 2 días."
+        return "\n".join(header_lines + ["", "No hay partidos próximos en los siguientes 2 días."])
 
-    # If no value bets: short, encouraging
+    # Bucket picks by odds level
+    safe_threshold = 2.00
+    safe_picks = sorted([p for p in picks if p["odds"] < safe_threshold],
+                        key=lambda p: -p["edge"])[:5]
+    risky_picks = sorted([p for p in picks if p["odds"] >= safe_threshold],
+                         key=lambda p: -p["edge"])[:5]
+
+    parts = list(header_lines) + [""]
+
+    # Header with totals
     if not picks:
         if not wplay_odds:
-            tail = (
-                "\n\n<i>⚠️ No pude leer cuotas de Wplay esta vez. "
-                "Las predicciones quedaron logueadas, pero no hay análisis de value.</i>"
-            )
+            parts.extend([
+                "<i>⚠️ No pude leer cuotas de Wplay esta vez. Las predicciones quedaron en DB pero sin análisis de value.</i>"
+            ])
         else:
-            tail = (
-                "\n\nMiré <b>{npred} partidos</b> en Premier y Liga BetPlay y "
-                "<b>ninguna cuota de Wplay tiene value real</b> sobre el modelo. "
-                "Las casas están bien calibradas hoy. Mejor no apostar."
-                "\n\n<i>Esto es lo correcto cuando no hay edge — no apostar es ganar.</i>"
-            ).format(npred=len(predictions))
-        return header + tail
+            parts.extend([
+                f"Miré <b>{len(predictions)} partidos</b> en Premier y BetPlay.",
+                "<b>Ninguna cuota de Wplay tiene value sobre el modelo hoy.</b>",
+                "Las casas están bien calibradas — mejor no apostar.",
+                "",
+                "<i>No apostar cuando no hay edge también es ganar.</i>",
+            ])
+        return "\n".join(parts)
 
-    # Otherwise: actionable picks
-    parts = [header, ""]
-    parts.append(f"<b>📍 {len(picks)} apuesta(s) recomendada(s):</b>")
+    # Safe section
+    parts.append("━━━━━━━━━━━━━━━━━━━━")
+    parts.append("<b>💪 CUOTAS SEGURAS</b> <i>(cuota &lt; 2.00)</i>")
+    parts.append("━━━━━━━━━━━━━━━━━━━━")
     parts.append("")
-
-    for i, vb in enumerate(picks, start=1):
-        league_short = "Premier" if "Premier" in vb["league"] else "BetPlay"
-        action, why = _humanize_pick(vb)
-        # Find kickoff from predictions list
-        kickoff_iso = next((p["kickoff"] for p in predictions if p["match_id"] == vb["match_id"]), "")
-        when = _humanize_kickoff(kickoff_iso) if kickoff_iso else ""
-
-        parts.append("━━━━━━━━━━━━━━━━━━━━")
-        parts.append(f"<b>{i}. {vb['home_team']} vs {vb['away_team']}</b>")
-        parts.append(f"<i>{league_short} · {when}</i>")
-        parts.append("")
-        parts.append(f"➤ Apostá: {action}")
-        parts.append(f"💰 Cuota Wplay: <b>{vb['odds']:.2f}</b>")
-        parts.append(f"💵 Stake: <b>${vb['recommended_stake']:,.0f} COP</b> <i>(¼ Kelly)</i>")
-        parts.append("")
-        parts.append(f"<i>🧠 {why}</i>")
+    if safe_picks:
+        for i, vb in enumerate(safe_picks, start=1):
+            parts.extend(_format_pick_block(vb, predictions, i))
+    else:
+        parts.append("<i>Hoy no hay value en cuotas bajas. El mercado está bien calibrado en favoritos — la casa y el modelo coinciden.</i>")
         parts.append("")
 
+    # Risky section
+    parts.append("━━━━━━━━━━━━━━━━━━━━")
+    parts.append("<b>🎲 CUOTAS CON VALOR PERO RIESGO</b> <i>(cuota ≥ 2.00)</i>")
+    parts.append("━━━━━━━━━━━━━━━━━━━━")
+    parts.append("")
+    if risky_picks:
+        start_idx = len(safe_picks) + 1
+        for offset, vb in enumerate(risky_picks):
+            parts.extend(_format_pick_block(vb, predictions, start_idx + offset))
+    else:
+        parts.append("<i>Hoy no hay value en cuotas altas con edge razonable.</i>")
+        parts.append("")
+
+    # Footer
     parts.append("━━━━━━━━━━━━━━━━━━━━")
     parts.append("")
     parts.append(
-        "<i>⚠️ Modo paper trading. No apuestes plata real "
+        "<i>⚠️ Modo paper. NO apuestes plata real "
         "hasta tener 100+ picks con CLV positivo.</i>"
     )
     parts.append("")
     parts.append(
-        f"<i>Analizados: {len(predictions)} partidos. "
-        f"Filtros: edge entre 5% y 30%.</i>"
+        f"<i>Analizados: {len(predictions)} partidos · "
+        f"Filtros: edge 5%–30% · Stake: ¼ Kelly · Cap 5%/bankroll</i>"
     )
 
     return "\n".join(parts)
