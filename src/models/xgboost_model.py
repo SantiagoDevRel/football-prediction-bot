@@ -54,6 +54,7 @@ class XGBoostModel(Model):
             features = self.builder.build(
                 m["home_team_id"], m["away_team_id"], kd,
                 league_id=m.get("league_id"),
+                match_id=m.get("match_id"),
             )
             X.append(features.to_array())
             hg, ag = int(m["home_goals"]), int(m["away_goals"])
@@ -125,7 +126,11 @@ class XGBoostModel(Model):
 
         kd = context.get("kickoff_date") or date.today()
         league_id = context.get("league_id")
-        feats = self.builder.build(home_team_id, away_team_id, kd, league_id=league_id)
+        match_id = context.get("match_id")
+        feats = self.builder.build(
+            home_team_id, away_team_id, kd,
+            league_id=league_id, match_id=match_id,
+        )
         x = feats.to_array().reshape(1, -1)
 
         p_1x2 = self.clf_1x2.predict_proba(x)[0]   # [home, draw, away]

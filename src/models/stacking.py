@@ -99,6 +99,7 @@ class StackingEnsemble(Model):
                             vm["home_team_id"], vm["away_team_id"],
                             kickoff_date=vm["kickoff_date"],
                             league_id=vm.get("league_id"),
+                            match_id=vm.get("match_id"),
                         )
                     except KeyError:
                         # Team unknown to this fold's base model; default to uniform

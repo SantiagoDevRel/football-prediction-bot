@@ -25,8 +25,8 @@ def load_matches_for_league(league_name: str, exclude_after: date | None = None)
     conn = sqlite3.connect(settings.db_path)
     conn.row_factory = sqlite3.Row
     sql = """
-        SELECT m.kickoff_utc, m.home_team_id, m.away_team_id, m.home_goals, m.away_goals,
-               m.league_id
+        SELECT m.id AS match_id, m.kickoff_utc, m.home_team_id, m.away_team_id,
+               m.home_goals, m.away_goals, m.league_id
           FROM matches m
           JOIN leagues l ON m.league_id = l.id
          WHERE l.name = ? AND m.status = 'finished'
@@ -41,6 +41,7 @@ def load_matches_for_league(league_name: str, exclude_after: date | None = None)
     conn.close()
     return [
         {
+            "match_id": r["match_id"],
             "home_team_id": r["home_team_id"],
             "away_team_id": r["away_team_id"],
             "home_goals": r["home_goals"],

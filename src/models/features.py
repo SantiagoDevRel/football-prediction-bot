@@ -7,14 +7,22 @@ recent form, scoring rate, defensive rate, rest, head-to-head and xG.
 Strict no-leakage rule: features are computed using ONLY matches that
 finished STRICTLY BEFORE the target match's kickoff. Training and
 inference share the same code path so this rule is enforced everywhere.
+
+If LLM-extracted qualitative flags are available for the target match
+(stored in qualitative_features table), they're added as binary features.
+Historical matches typically have no flags (0 vector), so the model
+learns to ignore them when missing.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 import numpy as np
+
+from src.llm.feature_extractor import FLAG_VOCABULARY
 
 
 # Window sizes for rolling stats. Smaller = more responsive but noisier;
@@ -22,39 +30,40 @@ import numpy as np
 # pick whichever it likes.
 WINDOWS_LAST_N = (3, 5, 10)
 
+# Sorted flag vocabulary for stable ordering across train/predict
+SORTED_FLAGS = sorted(FLAG_VOCABULARY)
+
 
 @dataclass
 class FeatureVector:
     """One row of features for a single (home, away, date) sample."""
-    # 1. Form / scoring
-    home_goals_for_avg: dict[int, float]    # {n: avg goals scored last n matches}
+    home_goals_for_avg: dict[int, float]
     home_goals_against_avg: dict[int, float]
     away_goals_for_avg: dict[int, float]
     away_goals_against_avg: dict[int, float]
 
-    # 2. xG (Premier only; zero for BetPlay where xG is unavailable)
     home_xg_avg: dict[int, float]
     home_xga_avg: dict[int, float]
     away_xg_avg: dict[int, float]
     away_xga_avg: dict[int, float]
 
-    # 3. Form (W=3 D=1 L=0 over last n)
     home_form_pts: dict[int, float]
     away_form_pts: dict[int, float]
 
-    # 4. Rest (days since last match)
     home_days_rest: float
     away_days_rest: float
 
-    # 5. Head-to-head (last 5 between these two teams)
     h2h_home_wins: int
     h2h_draws: int
     h2h_away_wins: int
     h2h_avg_total_goals: float
 
-    # 6. Has training data flag (low-data warning)
     home_n_matches: int
     away_n_matches: int
+
+    # LLM-extracted qualitative flags (binary, 0 if absent). Length is fixed
+    # by FLAG_VOCABULARY so train/predict always agree on dimensionality.
+    llm_flags: list[float]  # parallel to SORTED_FLAGS
 
     def to_array(self) -> np.ndarray:
         """Flatten to a fixed-order numpy array for XGBoost."""
@@ -78,6 +87,7 @@ class FeatureVector:
             float(self.h2h_away_wins), self.h2h_avg_total_goals,
             float(self.home_n_matches), float(self.away_n_matches),
         ])
+        parts.extend(self.llm_flags)
         return np.array(parts, dtype=np.float32)
 
     @staticmethod
@@ -95,6 +105,7 @@ class FeatureVector:
             "h2h_home_wins", "h2h_draws", "h2h_away_wins", "h2h_avg_goals",
             "home_n_matches", "away_n_matches",
         ])
+        names.extend([f"llm_{flag}" for flag in SORTED_FLAGS])
         return names
 
 
@@ -126,8 +137,26 @@ class FeatureBuilder:
              ORDER BY kickoff_utc ASC
             """
         ).fetchall()
+        # Pre-load qualitative flags by match_id (sparse — most matches have none)
+        flag_rows = conn.execute(
+            "SELECT match_id, flags FROM qualitative_features"
+        ).fetchall()
+        self._flags_by_match: dict[int, set[str]] = {}
+        for r in flag_rows:
+            try:
+                flag_list = json.loads(r["flags"]) if r["flags"] else []
+            except (TypeError, ValueError):
+                flag_list = []
+            self._flags_by_match[r["match_id"]] = set(flag_list)
         conn.close()
         self._matches = [dict(r) for r in rows]
+
+    def _flags_vector(self, match_id: int | None) -> list[float]:
+        """Return a binary vector aligned with SORTED_FLAGS for the given match."""
+        if match_id is None:
+            return [0.0] * len(SORTED_FLAGS)
+        flags = self._flags_by_match.get(match_id, set())
+        return [1.0 if f in flags else 0.0 for f in SORTED_FLAGS]
 
     def _team_history(
         self, team_id: int, before: date, league_id: int | None = None,
@@ -221,7 +250,7 @@ class FeatureBuilder:
 
     def build(
         self, home_team_id: int, away_team_id: int, kickoff_date: date,
-        league_id: int | None = None,
+        league_id: int | None = None, match_id: int | None = None,
     ) -> FeatureVector:
         home_hist = self._team_history(home_team_id, kickoff_date, league_id)
         away_hist = self._team_history(away_team_id, kickoff_date, league_id)
@@ -273,4 +302,5 @@ class FeatureBuilder:
             h2h_home_wins=h2h[0], h2h_draws=h2h[1], h2h_away_wins=h2h[2],
             h2h_avg_total_goals=h2h[3],
             home_n_matches=len(home_hist), away_n_matches=len(away_hist),
+            llm_flags=self._flags_vector(match_id),
         )

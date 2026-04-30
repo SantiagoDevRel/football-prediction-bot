@@ -54,8 +54,8 @@ def _load_matches(league_name: str, end: date | None = None) -> list[dict]:
     conn = sqlite3.connect(settings.db_path)
     conn.row_factory = sqlite3.Row
     sql = """
-        SELECT m.kickoff_utc, m.home_team_id, m.away_team_id, m.home_goals, m.away_goals,
-               m.league_id
+        SELECT m.id AS match_id, m.kickoff_utc, m.home_team_id, m.away_team_id,
+               m.home_goals, m.away_goals, m.league_id
           FROM matches m
           JOIN leagues l ON m.league_id = l.id
          WHERE l.name = ? AND m.status = 'finished'
@@ -70,6 +70,7 @@ def _load_matches(league_name: str, end: date | None = None) -> list[dict]:
     conn.close()
     return [
         {
+            "match_id": r["match_id"],
             "home_team_id": r["home_team_id"],
             "away_team_id": r["away_team_id"],
             "home_goals": r["home_goals"],
@@ -128,6 +129,7 @@ def evaluate(model_name: str, league_slug: str, train_end: date, test_from: date
             pred = model.predict_match(
                 m["home_team_id"], m["away_team_id"],
                 kickoff_date=m["kickoff_date"], league_id=m.get("league_id"),
+                match_id=m.get("match_id"),
             )
         except KeyError:
             # team not in training set — common for promoted teams. skip.

@@ -130,12 +130,12 @@ def _league_slug_from_name(name: str) -> str:
     return "liga_betplay"
 
 
-def _ensemble_predict(models: dict, home_id: int, away_id: int):
+def _ensemble_predict(models: dict, home_id: int, away_id: int, match_id: int | None = None):
     """If a stacking model is available, use it. Otherwise fall back to a
     simple average of Dixon-Coles + Elo."""
     if "stacking" in models:
         try:
-            p = models["stacking"].predict_match(home_id, away_id)
+            p = models["stacking"].predict_match(home_id, away_id, match_id=match_id)
             return p, [p]
         except KeyError:
             return None
@@ -354,7 +354,7 @@ async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
         models = models_by_league.get(slug, {})
         if not models:
             continue
-        result = _ensemble_predict(models, m["home_team_id"], m["away_team_id"])
+        result = _ensemble_predict(models, m["home_team_id"], m["away_team_id"], match_id=m["id"])
         if result is None:
             continue
         avg, _individual = result
