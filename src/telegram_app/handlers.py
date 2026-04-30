@@ -1,0 +1,578 @@
+"""Command handlers for the Telegram bot."""
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, date
+
+from loguru import logger
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import ContextTypes
+
+from src.betting.kelly import edge as edge_fn, kelly_stake
+from src.betting.value_detector import ValueBet
+from src.config import settings
+from src.data.persist import get_conn
+from src.telegram_app.staging import StagedPick, get_staged, stage_picks
+from src.tracking.pick_logger import (
+    compute_rolling_metrics,
+    get_current_bankroll,
+    log_pick,
+    resolve_pick,
+)
+
+
+# ---------- Helpers ----------
+
+_DAYS_ES = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
+_MONTHS_ES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+
+
+def _humanize_kickoff(iso: str | None) -> str:
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return iso[:16].replace("T", " ")
+    today = date.today()
+    diff = (dt.date() - today).days
+    if diff == 0:
+        when = "HOY"
+    elif diff == 1:
+        when = "MAÑANA"
+    else:
+        when = _DAYS_ES[dt.weekday()]
+    fecha = f"{dt.day:02d} {_MONTHS_ES[dt.month - 1]}"
+    return f"{when} {dt.strftime('%H:%M')} ({fecha})"
+
+
+def _humanize_action(market: str, selection: str, home: str, away: str) -> str:
+    if market == "1x2":
+        if selection == "home":
+            return f"Gana {home}"
+        if selection == "away":
+            return f"Gana {away} (visitante)"
+        if selection == "draw":
+            return "Empate (X)"
+    if market == "ou_1.5":
+        return "Más de 1.5 goles" if selection == "over" else "Menos de 1.5 goles"
+    if market == "ou_2.5":
+        return "Más de 2.5 goles" if selection == "over" else "Menos de 2.5 goles"
+    if market == "ou_3.5":
+        return "Más de 3.5 goles" if selection == "over" else "Menos de 3.5 goles"
+    if market == "btts":
+        return "Ambos equipos marcan" if selection == "yes" else "NO marcan los dos"
+    if market == "ah_-1.5":
+        return f"{home} gana por 2+ goles" if selection == "home" else f"{away} no pierde por 2+"
+    return f"{market}:{selection}"
+
+
+# ---------- /start ----------
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    bankroll = get_current_bankroll("paper")
+    msg = (
+        "<b>🎯 Football Prediction Bot</b>\n"
+        f"<i>Paper trading · Bankroll: ${bankroll:,.0f} COP</i>\n\n"
+        "<b>Comandos:</b>\n"
+        "/picks — analizar partidos próximos\n"
+        "/aposte &lt;n&gt; [stake] — registrar apuesta\n"
+        "/resolver &lt;pick_id&gt; ganada|perdida — marcar resultado\n"
+        "/balance — bankroll y picks abiertas\n"
+        "/historial — últimas resueltas\n"
+        "/help — ver esta ayuda\n\n"
+        "<i>Apretá un botón o escribí un comando.</i>"
+    )
+    keyboard = [
+        [InlineKeyboardButton("📊 Picks de hoy", callback_data="cmd:picks")],
+        [InlineKeyboardButton("💰 Mi balance", callback_data="cmd:balance"),
+         InlineKeyboardButton("📜 Historial", callback_data="cmd:historial")],
+    ]
+    await update.message.reply_text(
+        msg, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_start(update, context)
+
+
+# ---------- /picks ----------
+
+async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if update.message:
+        await update.message.reply_text("⏳ Analizando partidos y cuotas en Wplay…")
+    else:
+        await update.callback_query.message.reply_text("⏳ Analizando partidos y cuotas en Wplay…")
+
+    # Import here to avoid heavy import at module load
+    from scripts.daily_pipeline import run_pipeline_core
+
+    try:
+        result = await run_pipeline_core(persist_predictions_flag=True)
+    except Exception as exc:
+        logger.exception("pipeline failed")
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error corriendo pipeline: {exc}")
+        return
+
+    candidates = result["value_bets"]
+    bankroll = result["bankroll_paper"]
+    n_pred = len(result["predictions"])
+
+    # Stage candidates per chat (numbered 1..N)
+    staged = stage_picks(chat_id, candidates)
+
+    if not staged:
+        if result["wplay_odds_count"] == 0:
+            text = (
+                "⚠️ <b>No pude leer cuotas de Wplay esta vez.</b>\n"
+                "Las predicciones quedaron en DB pero no hay análisis de value."
+            )
+        else:
+            text = (
+                f"📊 Analicé <b>{n_pred} partidos</b> próximos.\n\n"
+                "<b>Ninguna cuota tiene value sobre el modelo hoy.</b>\n"
+                "Las casas están bien calibradas — mejor no apostar.\n\n"
+                "<i>No apostar cuando no hay edge también es ganar.</i>"
+            )
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+        return
+
+    # Group by safe (odds<2) vs risky (>=2) and produce numbered list
+    safe = [s for s in staged if s.odds < 2.0]
+    risky = [s for s in staged if s.odds >= 2.0]
+
+    parts: list[str] = [
+        f"<b>🎯 Picks del día</b>",
+        f"<i>Bankroll: ${bankroll:,.0f} · {n_pred} partidos analizados</i>",
+        "",
+    ]
+
+    def render_pick(s: StagedPick) -> list[str]:
+        league_short = "Premier" if "Premier" in s.league else "BetPlay"
+        action = _humanize_action(s.market, s.selection, s.home_team, s.away_team)
+        casa_implied = 1.0 / s.odds
+        when = _humanize_kickoff(s.kickoff_utc)
+        return [
+            f"<b>#{s.session_number}</b> · {s.home_team} vs {s.away_team}",
+            f"<i>{league_short} · {when}</i>",
+            f"➤ <b>{action}</b>",
+            f"💰 Cuota: <b>{s.odds:.2f}</b>  ·  Stake sugerido: <b>${s.recommended_stake:,.0f}</b>",
+            f"<i>🧠 Modelo: {s.model_probability:.0%} · Wplay: {casa_implied:.0%} · Edge: +{s.edge*100:.0f}%</i>",
+            "",
+        ]
+
+    if safe:
+        parts.append("━━━━━━━━━━━━━━━━━━━")
+        parts.append("<b>💪 CUOTAS SEGURAS</b> <i>(&lt; 2.00)</i>")
+        parts.append("━━━━━━━━━━━━━━━━━━━")
+        parts.append("")
+        for s in safe:
+            parts.extend(render_pick(s))
+    if risky:
+        parts.append("━━━━━━━━━━━━━━━━━━━")
+        parts.append("<b>🎲 CUOTAS CON VALOR</b> <i>(≥ 2.00)</i>")
+        parts.append("━━━━━━━━━━━━━━━━━━━")
+        parts.append("")
+        for s in risky:
+            parts.extend(render_pick(s))
+
+    parts.append("━━━━━━━━━━━━━━━━━━━")
+    parts.append(
+        "<i>Para apostar:</i> <code>/aposte 3 5000</code> "
+        "<i>(reemplazá 3 con el número y 5000 con la plata).</i>\n"
+        "<i>Para usar el stake sugerido:</i> <code>/aposte 3</code>"
+    )
+
+    msg = "\n".join(parts)
+    # Telegram has a 4096 char limit — slice if needed
+    if len(msg) > 4000:
+        msg = msg[:3990] + "\n…<i>(truncado)</i>"
+    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
+
+
+# ---------- /aposte ----------
+
+async def cmd_aposte(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Uso: <code>/aposte &lt;n&gt; [stake]</code>\n"
+            "Ejemplo: <code>/aposte 3 5000</code>\n"
+            "<i>Si no pasás stake, uso el sugerido (¼ Kelly).</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        n = int(args[0])
+    except ValueError:
+        await update.message.reply_text(f"'{args[0]}' no es un número válido.")
+        return
+
+    s = get_staged(chat_id, n)
+    if s is None:
+        await update.message.reply_text(
+            f"No encontré la pick #{n}. Corré /picks primero para ver las opciones."
+        )
+        return
+
+    # Determine stake
+    stake = s.recommended_stake
+    if len(args) >= 2:
+        try:
+            stake = float(args[1])
+        except ValueError:
+            await update.message.reply_text(f"'{args[1]}' no es un número válido para stake.")
+            return
+        if stake <= 0:
+            await update.message.reply_text("El stake tiene que ser positivo.")
+            return
+
+    # Build a ValueBet with the user's chosen stake and log it
+    vb = ValueBet(
+        match_id=s.match_id, home_team=s.home_team, away_team=s.away_team,
+        league=s.league, market=s.market, selection=s.selection, odds=s.odds,
+        bookmaker=s.bookmaker, model_probability=s.model_probability,
+        fair_odds=s.fair_odds, edge=s.edge, confidence=s.confidence,
+        recommended_stake=stake,
+        reasoning=s.reasoning,
+    )
+    pick_id = log_pick(vb, mode="paper")
+    bankroll = get_current_bankroll("paper")
+    action = _humanize_action(s.market, s.selection, s.home_team, s.away_team)
+    msg = (
+        f"✅ <b>Apuesta registrada</b>\n\n"
+        f"<b>Pick #{pick_id}</b> · {s.home_team} vs {s.away_team}\n"
+        f"➤ {action}\n"
+        f"💰 Cuota: <b>{s.odds:.2f}</b>  ·  Stake: <b>${stake:,.0f}</b>\n"
+        f"💵 Bankroll restante: <b>${bankroll:,.0f}</b>\n\n"
+        f"<i>Cuando termine el partido:</i>\n"
+        f"<code>/resolver {pick_id} ganada</code>\n"
+        f"<code>/resolver {pick_id} perdida</code>"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+# ---------- /resolver ----------
+
+async def cmd_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Uso: <code>/resolver &lt;pick_id&gt; ganada|perdida</code>\n"
+            "Ejemplo: <code>/resolver 42 ganada</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        pick_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text(f"'{args[0]}' no es un pick_id válido.")
+        return
+
+    outcome = args[1].lower().strip()
+    if outcome in ("ganada", "ganado", "win", "won", "g"):
+        won = True
+    elif outcome in ("perdida", "perdido", "loss", "lost", "l"):
+        won = False
+    else:
+        await update.message.reply_text(
+            f"No entendí '{outcome}'. Usá: ganada o perdida."
+        )
+        return
+
+    try:
+        resolve_pick(pick_id, won=won)
+    except ValueError as exc:
+        await update.message.reply_text(f"Error: {exc}")
+        return
+
+    bankroll = get_current_bankroll("paper")
+    metrics = compute_rolling_metrics("paper", days=30)
+    icon = "🟢" if won else "🔴"
+    status = "GANADA" if won else "PERDIDA"
+    msg = (
+        f"{icon} <b>Pick #{pick_id} {status}</b>\n\n"
+        f"💵 Bankroll: <b>${bankroll:,.0f}</b>\n"
+        f"<i>Últimos 30 días:</i>\n"
+        f"  • {metrics['n']} picks resueltas\n"
+        f"  • Win rate: {metrics['win_rate']:.0%}\n"
+        f"  • ROI: {metrics['roi']:+.1%}\n"
+        f"  • P&L total: ${metrics['total_pnl']:+,.0f}"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+# ---------- /balance ----------
+
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    bankroll = get_current_bankroll("paper")
+    metrics = compute_rolling_metrics("paper", days=30)
+
+    # Open picks (logged but not resolved)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, market, selection, odds_taken, stake, placed_at,
+                   (SELECT name FROM teams WHERE id = (SELECT home_team_id FROM matches WHERE id = picks.match_id)) AS home,
+                   (SELECT name FROM teams WHERE id = (SELECT away_team_id FROM matches WHERE id = picks.match_id)) AS away
+            FROM picks WHERE mode = 'paper' AND won IS NULL
+            ORDER BY placed_at DESC
+            """
+        ).fetchall()
+    open_picks = [dict(r) for r in rows]
+
+    parts = [
+        "<b>💰 Tu balance</b>",
+        "",
+        f"<b>Bankroll:</b> ${bankroll:,.0f} COP",
+        f"<b>Picks abiertas:</b> {len(open_picks)}",
+        "",
+        "<b>Últimos 30 días:</b>",
+        f"• Apuestas resueltas: {metrics['n']}",
+        f"• Win rate: {metrics['win_rate']:.1%}",
+        f"• ROI sobre stakes: {metrics['roi']:+.1%}",
+        f"• P&L: ${metrics['total_pnl']:+,.0f}",
+    ]
+    if open_picks:
+        parts.append("")
+        parts.append("<b>Picks abiertas:</b>")
+        for p in open_picks[:10]:
+            parts.append(
+                f"• #{p['id']} {p['home']} vs {p['away']} · "
+                f"{p['market']}:{p['selection']} @ {p['odds_taken']:.2f} · "
+                f"${p['stake']:,.0f}"
+            )
+    await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
+
+
+# ---------- /historial ----------
+
+async def cmd_historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, market, selection, odds_taken, stake, won, payout, clv, resolved_at,
+                   (SELECT name FROM teams WHERE id = (SELECT home_team_id FROM matches WHERE id = picks.match_id)) AS home,
+                   (SELECT name FROM teams WHERE id = (SELECT away_team_id FROM matches WHERE id = picks.match_id)) AS away
+            FROM picks
+            WHERE mode = 'paper' AND won IS NOT NULL
+            ORDER BY resolved_at DESC
+            LIMIT 10
+            """
+        ).fetchall()
+    if not rows:
+        await update.message.reply_text(
+            "<b>📜 Historial</b>\n\nNo hay picks resueltas aún.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    parts = ["<b>📜 Últimas 10 picks resueltas</b>", ""]
+    for r in rows:
+        icon = "🟢" if r["won"] == 1 else "🔴"
+        net = float(r["payout"]) - float(r["stake"])
+        clv_str = f"CLV {r['clv']:+.1%}" if r["clv"] is not None else ""
+        parts.append(
+            f"{icon} <b>#{r['id']}</b> {r['home']} vs {r['away']}\n"
+            f"   {r['market']}:{r['selection']} @ {r['odds_taken']:.2f} · stake ${r['stake']:,.0f} · "
+            f"<b>P&L ${net:+,.0f}</b> {clv_str}"
+        )
+    await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
+
+
+# ---------- /analizar ----------
+
+async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Find a specific match by team-name fragments and produce a full analysis."""
+    from src.data.wplay_scraper import normalize_name, scrape_all as scrape_wplay_all
+    from scripts.daily_pipeline import _load_models, _ensemble_predict, _league_slug_from_name
+
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Uso: <code>/analizar &lt;equipo1&gt; &lt;equipo2&gt;</code>\n"
+            "Ejemplo: <code>/analizar Arsenal Fulham</code>\n"
+            "<i>Podés escribir solo parte del nombre.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Tokens: split on "vs" if present, else use first half / second half
+    full = " ".join(args)
+    if " vs " in full.lower():
+        home_q, away_q = [s.strip() for s in full.lower().split(" vs ", 1)]
+    else:
+        # Fallback: split args in half
+        mid = len(args) // 2 or 1
+        home_q = " ".join(args[:mid]).lower()
+        away_q = " ".join(args[mid:]).lower()
+
+    # Search DB for an upcoming or recent match where both team names contain the queries
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT m.id, m.kickoff_utc, m.status, m.home_team_id, m.away_team_id,
+                   h.name AS home_name, a.name AS away_name, l.name AS league
+              FROM matches m
+              JOIN teams h ON m.home_team_id = h.id
+              JOIN teams a ON m.away_team_id = a.id
+              JOIN leagues l ON m.league_id = l.id
+             WHERE LOWER(h.name) LIKE ? AND LOWER(a.name) LIKE ?
+             ORDER BY m.kickoff_utc DESC LIMIT 5
+            """,
+            (f"%{home_q}%", f"%{away_q}%"),
+        ).fetchall()
+
+    if not rows:
+        # Try swapping order (user might have given them backwards)
+        with get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.id, m.kickoff_utc, m.status, m.home_team_id, m.away_team_id,
+                       h.name AS home_name, a.name AS away_name, l.name AS league
+                  FROM matches m
+                  JOIN teams h ON m.home_team_id = h.id
+                  JOIN teams a ON m.away_team_id = a.id
+                  JOIN leagues l ON m.league_id = l.id
+                 WHERE LOWER(h.name) LIKE ? AND LOWER(a.name) LIKE ?
+                 ORDER BY m.kickoff_utc DESC LIMIT 5
+                """,
+                (f"%{away_q}%", f"%{home_q}%"),
+            ).fetchall()
+        if rows:
+            await update.message.reply_text(
+                f"No encontré <b>{home_q}</b> de local. ¿Quisiste decir al revés? Probá invertir el orden.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await update.message.reply_text(
+            f"No encontré ningún partido con '{home_q}' vs '{away_q}'. "
+            "Probá nombres más completos o corré /picks para ver qué tenemos.",
+        )
+        return
+
+    # If multiple matches: pick the closest to today (most recent or earliest upcoming)
+    target = rows[0]  # already ordered
+    if len(rows) > 1:
+        scheduled = [r for r in rows if r["status"] == "scheduled"]
+        if scheduled:
+            target = scheduled[0]
+
+    match_id = target["id"]
+    home, away = target["home_name"], target["away_name"]
+    league = target["league"]
+    status = target["status"]
+
+    # Run ensemble
+    league_slug = _league_slug_from_name(league)
+    models = _load_models(league_slug)
+    if not models:
+        await update.message.reply_text(f"No hay modelos entrenados para {league}.")
+        return
+    pred_result = _ensemble_predict(models, target["home_team_id"], target["away_team_id"])
+    if pred_result is None:
+        await update.message.reply_text(
+            f"Uno de los equipos no estaba en el set de entrenamiento. No puedo predecir."
+        )
+        return
+    avg, _ = pred_result
+
+    # If the match is in the future and in our two leagues, try to grab Wplay odds.
+    casa_1x2: dict[str, float] = {}
+    if status == "scheduled":
+        try:
+            wplay = await scrape_wplay_all()
+            target_key = (normalize_name(home), normalize_name(away))
+            for o in wplay:
+                if (normalize_name(o.home_team), normalize_name(o.away_team)) == target_key:
+                    casa_1x2[o.selection] = o.odds
+        except Exception as exc:
+            logger.warning(f"Wplay scrape during /analizar failed: {exc}")
+
+    # Build response
+    when = _humanize_kickoff(target["kickoff_utc"])
+    parts = [
+        f"<b>📊 {home} vs {away}</b>",
+        f"<i>{league} · {when} · estado: {status}</i>",
+        "",
+        "<b>Predicción del modelo</b> <i>(ensemble Dixon-Coles + Elo)</i>",
+        f"  1X2:   <b>{avg.p_home_win:.0%}</b> / <b>{avg.p_draw:.0%}</b> / <b>{avg.p_away_win:.0%}</b>",
+        f"  xG:    <b>{avg.expected_home_goals:.2f} - {avg.expected_away_goals:.2f}</b>",
+        "",
+        "<b>Mercados de goles</b>",
+        f"  Más 1.5: {avg.p_over_1_5:.0%}  ·  Menos 1.5: {avg.p_under_1_5:.0%}",
+        f"  Más 2.5: {avg.p_over_2_5:.0%}  ·  Menos 2.5: {avg.p_under_2_5:.0%}",
+        f"  Más 3.5: {avg.p_over_3_5:.0%}  ·  Menos 3.5: {avg.p_under_3_5:.0%}",
+        f"  Ambos marcan: {avg.p_btts_yes:.0%}  ·  No: {avg.p_btts_no:.0%}",
+        "",
+        "<b>Hándicap</b>",
+        f"  {home} -1.5 (gana por 2+): {avg.p_home_minus_1_5:.0%}",
+        f"  {away} +1.5: {avg.p_away_plus_1_5:.0%}",
+    ]
+
+    if casa_1x2:
+        parts.append("")
+        parts.append("<b>Cuotas Wplay (1X2)</b>")
+        parts.append(
+            f"  H: {casa_1x2.get('home', '—')}  ·  X: {casa_1x2.get('draw', '—')}  ·  A: {casa_1x2.get('away', '—')}"
+        )
+        # Edge per selection
+        edges = []
+        for sel, prob in (("home", avg.p_home_win), ("draw", avg.p_draw), ("away", avg.p_away_win)):
+            if sel in casa_1x2:
+                e = edge_fn(casa_1x2[sel], prob)
+                edges.append((sel, prob, casa_1x2[sel], e))
+        edges.sort(key=lambda x: -x[3])
+        if edges and edges[0][3] >= settings.min_edge:
+            best = edges[0]
+            sel_es = {"home": f"Gana {home}", "draw": "Empate", "away": f"Gana {away}"}[best[0]]
+            parts.append("")
+            parts.append(
+                f"<b>💡 Mejor pick 1X2:</b> {sel_es} @ {best[2]:.2f}  "
+                f"(<b>edge +{best[3]*100:.0f}%</b>)"
+            )
+        elif edges:
+            best = edges[0]
+            parts.append("")
+            parts.append(
+                f"<i>El mejor pick 1X2 da edge {best[3]*100:+.0f}% — debajo del mínimo (5%). No vale.</i>"
+            )
+    else:
+        parts.append("")
+        parts.append(
+            "<i>(No tengo cuotas de Wplay para este partido en este momento. "
+            "Probá /picks o /analizar en pre-match cuando estén abiertas las cuotas.)</i>"
+        )
+
+    parts.append("")
+    parts.append(
+        "<i>⚠️ Análisis pre-partido. Otros mercados (O/U, hándicap, BTTS) "
+        "aún no tienen scraping de Wplay automatizado.</i>"
+    )
+
+    msg = "\n".join(parts)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+# ---------- Inline button callback ----------
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    if data == "cmd:picks":
+        # Run /picks logic
+        update_proxy = Update(update.update_id, message=query.message)
+        await cmd_picks(update_proxy, context)
+    elif data == "cmd:balance":
+        update_proxy = Update(update.update_id, message=query.message)
+        await cmd_balance(update_proxy, context)
+    elif data == "cmd:historial":
+        update_proxy = Update(update.update_id, message=query.message)
+        await cmd_historial(update_proxy, context)

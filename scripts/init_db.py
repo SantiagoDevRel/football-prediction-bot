@@ -135,6 +135,32 @@ CREATE TABLE IF NOT EXISTS bankroll_history (
     created_at  TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Staged picks for the Telegram bot. The bot runs the pipeline, stages
+-- candidates here numbered 1..N per chat_id. When the user runs /aposte N
+-- we promote that stage row to a real picks row.
+CREATE TABLE IF NOT EXISTS staged_picks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id           TEXT NOT NULL,
+    session_number    INTEGER NOT NULL,
+    match_id          INTEGER REFERENCES matches(id),
+    home_team         TEXT,
+    away_team         TEXT,
+    league            TEXT,
+    market            TEXT NOT NULL,
+    selection         TEXT NOT NULL,
+    odds              REAL NOT NULL,
+    bookmaker         TEXT NOT NULL,
+    model_probability REAL NOT NULL,
+    fair_odds         REAL,
+    edge              REAL,
+    confidence        REAL,
+    recommended_stake REAL,
+    reasoning         TEXT,
+    kickoff_utc       TEXT,
+    created_at        TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_staged_chat ON staged_picks(chat_id, session_number);
+
 -- Model performance tracking (rollups)
 CREATE TABLE IF NOT EXISTS model_performance (
     id              INTEGER PRIMARY KEY,

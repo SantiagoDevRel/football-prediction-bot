@@ -310,22 +310,24 @@ def _format_telegram_message(
     return "\n".join(parts)
 
 
-async def main() -> None:
-    logger.info("=== Daily pipeline starting ===")
-    logger.info(f"Mode: {settings.betting_mode} | bankroll target: paper")
+async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
+    """Shared pipeline used by both the daily cron and the Telegram bot.
 
-    # 1. Pull fixtures
+    Does NOT auto-log picks. Returns the candidates so the caller decides:
+        - cron mode → log all candidates as paper picks
+        - bot mode  → stage candidates per chat_id, user confirms with /aposte
+
+    Returns dict with:
+        predictions       (list of dicts, one per match)
+        value_bets        (list of dicts; ValueBet __dict__ flattened)
+        bankroll_paper    (float)
+        wplay_odds_count  (int)
+        n_fixtures        (int)
+    """
     n_fixtures = await _pull_fixtures()
-    logger.info(f"fixtures upserted: {n_fixtures}")
-
-    # 2. Load models per league
     models_by_league = {slug: _load_models(slug) for slug in LEAGUES}
-
-    # 3. Get upcoming matches
     upcoming = _load_upcoming_matches()
-    logger.info(f"upcoming matches: {len(upcoming)}")
 
-    # 4. Predict + persist
     predictions_summary: list[dict] = []
     for m in upcoming:
         slug = _league_slug_from_name(m["league_name"])
@@ -337,20 +339,22 @@ async def main() -> None:
             continue
         avg, _individual = result
 
-        # Persist
-        for market, sel, prob in [
-            ("1x2", "home", avg.p_home_win),
-            ("1x2", "draw", avg.p_draw),
-            ("1x2", "away", avg.p_away_win),
-            ("ou_2.5", "over", avg.p_over_2_5),
-            ("ou_2.5", "under", avg.p_under_2_5),
-            ("btts", "yes", avg.p_btts_yes),
-            ("btts", "no", avg.p_btts_no),
-        ]:
-            _persist_prediction(
-                m["id"], market, sel, "ensemble_avg", prob,
-                features={"home_xG": avg.expected_home_goals, "away_xG": avg.expected_away_goals},
-            )
+        if persist_predictions_flag:
+            for market, sel, prob in [
+                ("1x2", "home", avg.p_home_win),
+                ("1x2", "draw", avg.p_draw),
+                ("1x2", "away", avg.p_away_win),
+                ("ou_2.5", "over", avg.p_over_2_5),
+                ("ou_2.5", "under", avg.p_under_2_5),
+                ("btts", "yes", avg.p_btts_yes),
+                ("btts", "no", avg.p_btts_no),
+            ]:
+                _persist_prediction(
+                    m["id"], market, sel, "ensemble_avg", prob,
+                    features={"home_xG": avg.expected_home_goals,
+                              "away_xG": avg.expected_away_goals},
+                )
+
         predictions_summary.append({
             "match_id": m["id"],
             "kickoff": m["kickoff_utc"],
@@ -367,43 +371,29 @@ async def main() -> None:
             "ensemble": avg,
         })
 
-    logger.info(f"predictions persisted for {len(predictions_summary)} matches")
-
-    # 5. Try Wplay odds (best effort)
     wplay_odds: list = []
     try:
         wplay_odds = await scrape_wplay_all()
-        logger.info(f"Wplay odds captured: {len(wplay_odds)}")
     except Exception as exc:
         logger.warning(f"Wplay scrape failed: {exc}")
 
-    # 6. Value detection - only if we have odds
     bankroll = get_current_bankroll("paper")
-    picks_made: list = []
+    candidates: list[dict] = []
     if wplay_odds:
-        # Build a lookup: (norm_home, norm_away) -> dict of selection -> odds
         odds_by_match: dict[tuple[str, str], dict[str, float]] = {}
         for o in wplay_odds:
             key = (normalize_name(o.home_team), normalize_name(o.away_team))
             odds_by_match.setdefault(key, {})[o.selection] = o.odds
 
-        # For each prediction, look up the matching Wplay row
         for p in predictions_summary:
             key = (normalize_name(p["home"]), normalize_name(p["away"]))
-            casa_odds = odds_by_match.get(key)
-            if not casa_odds:
-                # try swapping H/A in case ESPN/Wplay flipped them
-                key_swap = (normalize_name(p["away"]), normalize_name(p["home"]))
-                casa_odds = odds_by_match.get(key_swap)
-                if casa_odds:
-                    logger.warning(f"team order swapped between sources for {p['home']} vs {p['away']}; skipping")
+            casa = odds_by_match.get(key)
+            if not casa:
                 continue
-
-            lines: list[OddsLine] = []
-            for sel in ("home", "draw", "away"):
-                if sel in casa_odds:
-                    lines.append(OddsLine("1x2", sel, casa_odds[sel], bookmaker="wplay"))
-
+            lines = [
+                OddsLine("1x2", sel, casa[sel], bookmaker="wplay")
+                for sel in ("home", "draw", "away") if sel in casa
+            ]
             value_bets = detect_value(
                 match_id=p["match_id"],
                 home_team=p["home"],
@@ -414,15 +404,46 @@ async def main() -> None:
                 bankroll=bankroll,
             )
             for vb in value_bets:
-                pick_id = log_pick(vb, mode="paper")
-                picks_made.append({"pick_id": pick_id, **vb.__dict__})
-        logger.info(f"value bets logged: {len(picks_made)}")
-    else:
-        logger.info("no Wplay odds — skipping value detection. predictions logged only.")
+                vb_dict = vb.__dict__.copy()
+                vb_dict["kickoff"] = p["kickoff"]
+                candidates.append(vb_dict)
+
+    return {
+        "predictions": predictions_summary,
+        "value_bets": candidates,
+        "bankroll_paper": bankroll,
+        "wplay_odds_count": len(wplay_odds),
+        "n_fixtures": n_fixtures,
+    }
+
+
+async def main() -> None:
+    """Cron entry point: runs core pipeline, auto-logs picks, sends Telegram summary."""
+    logger.info("=== Daily pipeline starting ===")
+    logger.info(f"Mode: {settings.betting_mode} | bankroll target: paper")
+
+    result = await run_pipeline_core(persist_predictions_flag=True)
+    logger.info(
+        f"fixtures={result['n_fixtures']} predictions={len(result['predictions'])} "
+        f"wplay_odds={result['wplay_odds_count']} value_candidates={len(result['value_bets'])}"
+    )
+
+    # Cron auto-logs all candidates as paper picks
+    picks_made: list[dict] = []
+    for vb_dict in result["value_bets"]:
+        from src.betting.value_detector import ValueBet
+        # Reconstruct ValueBet from flattened dict (drop kickoff which we added)
+        vb_kwargs = {k: v for k, v in vb_dict.items() if k != "kickoff"}
+        vb = ValueBet(**vb_kwargs)
+        pick_id = log_pick(vb, mode="paper")
+        picks_made.append({"pick_id": pick_id, **vb_dict})
+
+    logger.info(f"value bets logged: {len(picks_made)}")
 
     # 7. Compose Telegram summary
-    msg = _format_telegram_message(predictions_summary, picks_made, bankroll, wplay_odds)
-
+    msg = _format_telegram_message(
+        result["predictions"], picks_made, result["bankroll_paper"], [None] * result["wplay_odds_count"]
+    )
     await send_message(msg)
     logger.info("=== Daily pipeline done ===")
 
