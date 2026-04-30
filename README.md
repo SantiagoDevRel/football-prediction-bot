@@ -51,10 +51,11 @@ Cada apuesta se loggea con TODO el contexto (probas de cada modelo sub, cuota de
 
 | Fase | Entregable | Estado |
 |---|---|---|
-| **0** | Estructura del repo, schema DB, stubs de módulos | 🟡 En curso |
-| **1** | Scrapers funcionando (API-Football + Understat + Wplay) + Dixon-Coles + Elo + backtest 2 temporadas | ⏳ Pendiente |
-| **2** | XGBoost + Bayesiano + features LLM + ensemble + Telegram bot | ⏳ Pendiente |
-| **3** | Pipeline de re-entrenamiento + dashboard + loop mensual de revisión humana | ⏳ Pendiente |
+| **0** | Estructura del repo, schema DB, stubs de módulos | ✅ Listo |
+| **1** | ESPN client + Dixon-Coles + Elo + backtest | ✅ Listo (ver `docs/phase1-backtest-report.md`) |
+| **2** | LLM features + value detector + pick logger + daily pipeline + manual paper-pick CLI | ✅ Listo |
+| **2.5** | Wplay scraper funcional (selectores) + Telegram bot configurado + cron diario | 🟡 Pendiente humano (ver `HANDOFF.md`) |
+| **3** | XGBoost + xG (Understat) + Bayesian + ensemble stacking + dashboard | ⏳ Pendiente |
 
 **Gate crítico al final de Fase 1:** si en backtest el modelo no le gana al mercado en CLV, paramos y revisamos diseño. No avanzamos asumiendo que "después se arregla".
 
