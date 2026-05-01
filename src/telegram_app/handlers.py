@@ -390,8 +390,18 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     from src.data.espn import fetch_scoreboard
     from src.data.persist import bulk_upsert_espn
     from src.data.wplay_scraper import scrape_match_markets
-    from src.models.inplay_v0 import condition_on_state
+    from src.models.inplay_v0 import condition_on_state as v0_condition
+    from src.models.inplay_v1 import InPlayV1
     from scripts.daily_pipeline import _ensemble_predict, _league_slug_from_name, _load_models, LEAGUES
+
+    # Lazy-fit v1 once per process
+    if not hasattr(cmd_envivo, "_v1"):
+        v1 = InPlayV1(str(settings.db_path))
+        v1.fit()
+        cmd_envivo._v1 = v1
+    v1 = cmd_envivo._v1
+    use_v1 = v1.fitted_at is not None
+    inplay_label = "in-play v1 (minute-bucketed)" if use_v1 else "in-play v0 (flat Poisson)"
 
     await update.message.reply_text(
         "⏳ Buscando partidos en vivo en ESPN…",
@@ -429,10 +439,9 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "<b>📺 Partidos en vivo</b>",
         f"<i>{len(live_matches)} partido(s) en juego</i>",
         "",
-        "<b>⚠️ DISCLAIMER:</b> el modelo in-play es <b>v0 honesto</b> — "
-        "una recomputación matemática (Poisson sobre el tiempo restante) "
-        "del modelo pre-partido. NO está entrenado con datos minuto-a-minuto. "
-        "<b>Apostá en vivo solo apuestas chicas hasta tener un modelo in-play real.</b>",
+        f"<b>⚠️ DISCLAIMER:</b> usando <b>{inplay_label}</b>. "
+        "Es una aproximación, no un modelo neural in-play de clase mundial. "
+        "<b>Apostá CHICO en vivo.</b>",
         "",
     ]
 
@@ -459,9 +468,14 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             continue
         avg, _ = ensemble
 
-        live_pred = condition_on_state(
-            avg, lm["home_goals"], lm["away_goals"], minute=lm["minute"]
-        )
+        if use_v1:
+            live_pred = v1.condition_on_state(
+                avg, lm["home_goals"], lm["away_goals"], minute=lm["minute"]
+            )
+        else:
+            live_pred = v0_condition(
+                avg, lm["home_goals"], lm["away_goals"], minute=lm["minute"]
+            )
 
         # Try to fetch live Wplay odds for this match
         casa: dict[tuple[str, str], float] = {}
@@ -858,7 +872,41 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "Probá /picks o /analizar en pre-match cuando estén abiertas las cuotas.)</i>"
         )
 
+    # Top scorers section (anytime scorer model)
+    try:
+        from src.models.player_scorers import AnytimeScorerModel
+        if not hasattr(cmd_analizar, "_scorer_model"):
+            sm = AnytimeScorerModel(str(settings.db_path))
+            sm.fit()
+            cmd_analizar._scorer_model = sm
+        sm = cmd_analizar._scorer_model
+        home_scorers = sm.top_scorers(target["home_team_id"], n=4,
+                                       match_lambda_for_team=avg.expected_home_goals)
+        away_scorers = sm.top_scorers(target["away_team_id"], n=4,
+                                       match_lambda_for_team=avg.expected_away_goals)
+        if home_scorers or away_scorers:
+            parts.append("")
+            parts.append("<b>👤 Anytime scorer (top candidatos)</b>")
+            for s in home_scorers:
+                parts.append(
+                    f"  <i>{home}:</i> <b>{s.player_name}</b> "
+                    f"({s.goals_scored}g) → {s.p_anytime_score:.0%}"
+                )
+            for s in away_scorers:
+                parts.append(
+                    f"  <i>{away}:</i> <b>{s.player_name}</b> "
+                    f"({s.goals_scored}g) → {s.p_anytime_score:.0%}"
+                )
+            parts.append(
+                "<i>Si Wplay paga &gt; 1/(prob mostrada), hay value. "
+                "Limitación: no sabemos si arrancan en el 11 inicial.</i>"
+            )
+    except Exception as exc:
+        logger.warning(f"scorer model failed: {exc}")
+
     msg = "\n".join(parts)
+    if len(msg) > 4000:
+        msg = msg[:3990] + "\n…<i>(truncado)</i>"
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 

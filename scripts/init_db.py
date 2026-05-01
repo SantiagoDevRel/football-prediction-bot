@@ -156,6 +156,23 @@ CREATE TABLE IF NOT EXISTS bankroll_history (
     created_at  TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Per-match goal events (from ESPN keyEvents).
+-- One row per goal scored, with the scoring player and minute.
+CREATE TABLE IF NOT EXISTS goal_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id     INTEGER REFERENCES matches(id),
+    espn_player_id TEXT,
+    player_name  TEXT NOT NULL,
+    team_api_id  TEXT,
+    team_name    TEXT,
+    minute       INTEGER,                    -- stripped of stoppage time
+    is_penalty   INTEGER DEFAULT 0,
+    is_own_goal  INTEGER DEFAULT 0,
+    created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_goal_match ON goal_events(match_id);
+CREATE INDEX IF NOT EXISTS idx_goal_player ON goal_events(espn_player_id);
+
 -- Staged picks for the Telegram bot. The bot runs the pipeline, stages
 -- candidates here numbered 1..N per chat_id. When the user runs /aposte N
 -- we promote that stage row to a real picks row.

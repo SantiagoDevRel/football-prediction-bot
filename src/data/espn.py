@@ -169,6 +169,58 @@ async def fetch_scoreboard(
     return matches
 
 
+async def fetch_match_goal_events(league_slug: str, event_id: str) -> list[dict] | None:
+    """Extract goal events from the /summary keyEvents array.
+
+    Returns a list of {minute, player_name, espn_player_id, team_api_id,
+    team_name, is_penalty, is_own_goal}. Returns None on fetch failure,
+    empty list when match has no goals.
+    """
+    league_code = ESPN_LEAGUE_BY_SLUG.get(league_slug)
+    if not league_code:
+        return None
+    url = f"{ESPN_BASE}/{league_code}/summary"
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"}) as client:
+            resp = await client.get(url, params={"event": event_id})
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as exc:
+        logger.warning(f"ESPN summary {event_id} failed: {exc}")
+        return None
+
+    out: list[dict] = []
+    for event in data.get("keyEvents", []) or []:
+        et = (event.get("type") or {}).get("text", "")
+        if not event.get("scoringPlay"):
+            # Not a goal
+            continue
+        # Minute parsing: clock.displayValue like "87'" or "45'+1'"
+        clock = (event.get("clock") or {}).get("displayValue", "")
+        minute = None
+        if clock:
+            import re as _re
+            m = _re.match(r"(\d+)", clock)
+            if m:
+                minute = int(m.group(1))
+        team = event.get("team") or {}
+        # The scoring player is always participants[0].athlete (assists are [1])
+        participants = event.get("participants") or []
+        if not participants:
+            continue
+        scorer = (participants[0].get("athlete") or {})
+        out.append({
+            "minute": minute,
+            "espn_player_id": str(scorer.get("id", "")),
+            "player_name": scorer.get("displayName", ""),
+            "team_api_id": str(team.get("id", "")),
+            "team_name": team.get("displayName", ""),
+            "is_penalty": "penalty" in et.lower(),
+            "is_own_goal": "own goal" in et.lower(),
+        })
+    return out
+
+
 async def fetch_match_summary(league_slug: str, event_id: str) -> dict | None:
     """ESPN's /summary endpoint returns boxscore stats: cards, corners,
     fouls, shots, possession per team. Used to backfill match_stats table.
