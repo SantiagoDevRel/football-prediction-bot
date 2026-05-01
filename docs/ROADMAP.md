@@ -5,15 +5,17 @@ Orden = prioridad. Marcamos `[x]` cuando se cierra y `[~]` cuando está en curso
 
 ---
 
-## ✅ DONE
+## ✅ DONE — 18/20 ítems del roadmap
 
-- [x] **Phase 0** — Repo, schema SQLite, módulos
-- [x] **Phase 1** — ESPN client, persist layer, Dixon-Coles + Elo, backtest harness
-- [x] **Phase 2** — LLM feature extractor, value detector, pick logger, daily pipeline E2E
-- [x] **Phase 2.1** — Wplay scraper funcional (1X2 desde league pages)
-- [x] **Phase 2.2** — Telegram bot output (one-way) con value bets
-- [x] **Phase 2.3** — Cap de edge >30% (filtro de bugs del modelo)
-- [x] **Phase 2.4** — Bankroll 100k + mensaje en secciones (cuotas seguras / con riesgo) + más mercados en el modelo (O/U 1.5/3.5, hándicap -1.5)
+- [x] **Phase 0-2.5** — Sistema usable end-to-end con bot Telegram, Wplay multi-mercado,
+      auto-resolución, in-play v0, schedule Windows, /analizar
+- [x] **Phase 3** — Understat xG, XGBoost con features, news + LLM features wired,
+      stacking + calibración, backtest robusto
+- [x] **Phase 4 (cards + corners)** — modelo Poisson sobre ESPN summary endpoint
+- [x] **Phase 5.39** — Multi-bookie comparator vía The Odds API (best price across
+      Pinnacle/Bet365/etc.)
+- [x] **Phase 6** — Tests automatizados (16 passing), risk management (5 layers),
+      auto-retrain semanal con safety gate, Streamlit dashboard
 
 ---
 
