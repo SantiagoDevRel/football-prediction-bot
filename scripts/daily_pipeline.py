@@ -35,6 +35,7 @@ from src.data.wplay_scraper import (  # noqa: E402
     scrape_all_with_markets,
 )
 from src.notifications.telegram_bot import send_message  # noqa: E402
+from src.llm.pick_reviewer import PickReviewer  # noqa: E402
 from src.tracking.auto_resolver import auto_resolve_paper_picks  # noqa: E402
 from src.tracking.pick_logger import get_current_bankroll, log_pick  # noqa: E402
 
@@ -278,25 +279,46 @@ def _humanize_pick(vb: dict) -> tuple[str, str]:
 
 
 def _format_pick_block(vb: dict, predictions: list, idx: int) -> list[str]:
-    """Render one pick as a block of lines."""
-    league_short = "Premier" if "Premier" in vb["league"] else "BetPlay"
+    """Render one pick as a block of lines, including Claude's verdict if any."""
+    if "Premier" in vb["league"]:
+        league_short = "Premier"
+    elif "BetPlay" in vb["league"]:
+        league_short = "BetPlay"
+    elif "Libertadores" in vb["league"]:
+        league_short = "Libertadores"
+    elif "Sudamericana" in vb["league"]:
+        league_short = "Sudamericana"
+    else:
+        league_short = vb["league"][:12]
+
     action, why = _humanize_pick(vb)
     kickoff_iso = next(
         (p["kickoff"] for p in predictions if p["match_id"] == vb["match_id"]), ""
     )
     when = _humanize_kickoff(kickoff_iso) if kickoff_iso else ""
 
-    return [
+    block = [
         f"<b>#{idx} · {vb['home_team']} vs {vb['away_team']}</b>",
         f"<i>{league_short} · {when}</i>",
         "",
         f"➤ Apostá: {action}",
-        f"💰 Cuota Wplay: <b>{vb['odds']:.2f}</b>",
+        f"💰 Cuota: <b>{vb['odds']:.2f}</b>",
         f"💵 Stake: <b>${vb['recommended_stake']:,.0f} COP</b> <i>(¼ Kelly)</i>",
         "",
         f"<i>🧠 {why}</i>",
-        "",
     ]
+    # Claude's verdict (if reviewer ran)
+    verdict = vb.get("claude_verdict")
+    reasoning = vb.get("claude_reasoning")
+    if verdict:
+        icon = {"take": "✅", "reduce": "⚠️", "skip": "🛑"}.get(verdict, "❓")
+        verdict_es = {"take": "ok", "reduce": "stake reducido", "skip": "skip"}.get(verdict, verdict)
+        if reasoning:
+            block.append(f"<i>{icon} Claude ({verdict_es}): {reasoning}</i>")
+        else:
+            block.append(f"<i>{icon} Claude: {verdict_es}</i>")
+    block.append("")
+    return block
 
 
 def _format_telegram_message(
@@ -509,6 +531,26 @@ async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
                 vb_dict["kickoff"] = p["kickoff"]
                 candidates.append(vb_dict)
 
+    # Claude review pass: each candidate gets a verdict (take/reduce/skip) +
+    # short reasoning. Reduces stake to 50% on 'reduce', drops 'skip' picks.
+    if candidates and settings.anthropic_api_key:
+        reviewer = PickReviewer(settings.anthropic_api_key)
+        kept: list[dict] = []
+        for c in candidates:
+            review = await reviewer.review(c)
+            c["claude_verdict"] = review.verdict
+            c["claude_reasoning"] = review.reasoning
+            c["claude_confidence"] = review.confidence
+            if review.verdict == "skip":
+                logger.info(f"  Claude SKIP: {c['home_team']} v {c['away_team']} "
+                            f"{c['market']}:{c['selection']} — {review.reasoning[:120]}")
+                continue
+            if review.verdict == "reduce":
+                c["recommended_stake"] = c["recommended_stake"] * 0.5
+            kept.append(c)
+        logger.info(f"Claude review: kept {len(kept)} of {len(candidates)} candidates")
+        candidates = kept
+
     return {
         "predictions": predictions_summary,
         "value_bets": candidates,
@@ -543,7 +585,9 @@ async def main() -> None:
     rejected: list[str] = []
     for vb_dict in result["value_bets"]:
         from src.betting.value_detector import ValueBet
-        vb_kwargs = {k: v for k, v in vb_dict.items() if k != "kickoff"}
+        # Strip enrichment fields that aren't ValueBet constructor args
+        excluded = {"kickoff", "claude_verdict", "claude_reasoning", "claude_confidence"}
+        vb_kwargs = {k: v for k, v in vb_dict.items() if k not in excluded}
         vb = ValueBet(**vb_kwargs)
         try:
             pick_id = log_pick(vb, mode="paper")
