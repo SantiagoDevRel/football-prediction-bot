@@ -27,6 +27,8 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 ESPN_LEAGUE_BY_SLUG: dict[str, str] = {
     "premier_league": "eng.1",
     "liga_betplay": "col.1",
+    "sudamericana": "conmebol.sudamericana",
+    "libertadores": "conmebol.libertadores",
 }
 
 

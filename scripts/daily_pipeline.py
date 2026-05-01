@@ -38,8 +38,13 @@ from src.notifications.telegram_bot import send_message  # noqa: E402
 from src.tracking.auto_resolver import auto_resolve_paper_picks  # noqa: E402
 from src.tracking.pick_logger import get_current_bankroll, log_pick  # noqa: E402
 
-LEAGUES = ["premier_league", "liga_betplay"]
-LEAGUE_NAME = {"premier_league": "Premier League", "liga_betplay": "Liga BetPlay Dimayor"}
+LEAGUES = ["premier_league", "liga_betplay", "sudamericana", "libertadores"]
+LEAGUE_NAME = {
+    "premier_league": "Premier League",
+    "liga_betplay": "Liga BetPlay Dimayor",
+    "sudamericana": "Copa Sudamericana",
+    "libertadores": "Copa Libertadores",
+}
 ARTIFACTS = ROOT / "models_artifacts"
 
 
@@ -128,6 +133,10 @@ def _load_upcoming_matches() -> list[dict]:
 def _league_slug_from_name(name: str) -> str:
     if "Premier" in name:
         return "premier_league"
+    if "Sudamericana" in name:
+        return "sudamericana"
+    if "Libertadores" in name:
+        return "libertadores"
     return "liga_betplay"
 
 

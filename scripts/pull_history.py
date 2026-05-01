@@ -31,7 +31,7 @@ async def pull_one(league_slug: str, start: date, end: date) -> int:
 async def main_async() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--league", default="premier_league",
-                        choices=["premier_league", "liga_betplay"])
+                        choices=["premier_league", "liga_betplay", "sudamericana", "libertadores"])
     parser.add_argument("--from", dest="from_date", help="YYYY-MM-DD")
     parser.add_argument("--to", dest="to_date", help="YYYY-MM-DD")
     parser.add_argument("--all-recent", action="store_true",
@@ -41,7 +41,7 @@ async def main_async() -> None:
     if args.all_recent:
         end = date.today()
         start = end - timedelta(days=540)  # ~18 months
-        for slug in ("premier_league", "liga_betplay"):
+        for slug in ("premier_league", "liga_betplay", "sudamericana", "libertadores"):
             await pull_one(slug, start, end)
         return
 

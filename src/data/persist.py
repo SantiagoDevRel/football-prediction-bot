@@ -33,8 +33,18 @@ def get_conn():
 def ensure_league(conn: sqlite3.Connection, slug: str, season: int) -> int:
     """Insert league if missing, return its id."""
     code = ESPN_LEAGUE_BY_SLUG.get(slug, slug)
-    name_map = {"premier_league": "Premier League", "liga_betplay": "Liga BetPlay Dimayor"}
-    country_map = {"premier_league": "England", "liga_betplay": "Colombia"}
+    name_map = {
+        "premier_league": "Premier League",
+        "liga_betplay": "Liga BetPlay Dimayor",
+        "sudamericana": "Copa Sudamericana",
+        "libertadores": "Copa Libertadores",
+    }
+    country_map = {
+        "premier_league": "England",
+        "liga_betplay": "Colombia",
+        "sudamericana": "South America",
+        "libertadores": "South America",
+    }
     cur = conn.execute(
         "SELECT id FROM leagues WHERE name = ? AND season = ?",
         (name_map.get(slug, slug), season),
@@ -63,13 +73,9 @@ def ensure_team(conn: sqlite3.Connection, name: str, league_id: int, espn_id: st
 
 
 def _infer_season(kickoff: datetime, slug: str) -> int:
-    """Infer the football season starting year from kickoff datetime.
-
-    European leagues run Aug-May → season = year if month >= 7 else year - 1.
-    Liga BetPlay (Colombia) runs in calendar year halves but we use the calendar
-    year for simplicity (split into Apertura/Finalizacion happens elsewhere).
-    """
-    if slug == "liga_betplay":
+    """Infer the football season starting year from kickoff datetime."""
+    if slug in ("liga_betplay", "sudamericana", "libertadores"):
+        # South-American competitions run within a calendar year
         return kickoff.year
     # Default European convention
     return kickoff.year if kickoff.month >= 7 else kickoff.year - 1
