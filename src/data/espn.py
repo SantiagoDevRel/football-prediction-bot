@@ -54,22 +54,52 @@ class ESPNMatch:
     venue: str | None
 
 
-def _map_status(espn_status_name: str) -> str:
+_CANCELLED_NAMES = {
+    "STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_CANCELLED",
+    "STATUS_FORFEIT", "STATUS_ABANDONED",
+}
+
+
+def _map_status(espn_status_name: str, state: str | None = None) -> str:
+    """Map ESPN status to our internal vocabulary.
+
+    Prefers `state` (`pre` / `in` / `post`) — it's the canonical live indicator
+    and immune to ESPN adding new STATUS_* names we don't know about. Falls
+    back to name-based mapping when state is missing.
+    """
+    # State is the canonical signal: 'in' = live, 'post' = match over,
+    # 'pre' = not started. ESPN sets this consistently across all soccer
+    # leagues — name varies (STATUS_FIRST_HALF / STATUS_IN_PROGRESS / ...).
+    if state == "in":
+        return "live"
+    if state == "post":
+        if espn_status_name in _CANCELLED_NAMES:
+            return "cancelled"
+        return "finished"
+    if state == "pre":
+        return "scheduled"
+
+    # Legacy name-based fallback: some endpoints don't include state.
     if espn_status_name in ("STATUS_SCHEDULED", "STATUS_DELAYED"):
         return "scheduled"
     live_set = {
         "STATUS_FIRST_HALF", "STATUS_HALFTIME", "STATUS_SECOND_HALF",
-        "STATUS_END_OF_PERIOD", "STATUS_OVERTIME",
-        "STATUS_FIRST_HALF_EXTRA_TIME", "STATUS_SECOND_HALF_EXTRA_TIME",
-        "STATUS_END_OF_EXTRA_TIME", "STATUS_SHOOTOUT",
+        "STATUS_END_OF_PERIOD", "STATUS_OVERTIME", "STATUS_IN_PROGRESS",
+        "STATUS_LIVE", "STATUS_FIRST_HALF_EXTRA_TIME",
+        "STATUS_SECOND_HALF_EXTRA_TIME", "STATUS_END_OF_EXTRA_TIME",
+        "STATUS_SHOOTOUT",
     }
     if espn_status_name in live_set:
         return "live"
     if espn_status_name in ("STATUS_FULL_TIME", "STATUS_FINAL", "STATUS_END_OF_REGULATION"):
         return "finished"
-    if espn_status_name in ("STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_FORFEIT", "STATUS_ABANDONED"):
+    if espn_status_name in _CANCELLED_NAMES:
         return "cancelled"
-    return "scheduled"  # safe default
+
+    # Unknown status with no state — log so we can extend the mapping next time
+    # we see it. Default to scheduled (safest: won't accidentally render as live).
+    logger.warning(f"unknown ESPN status: name={espn_status_name!r} state={state!r}")
+    return "scheduled"
 
 
 def _parse_minute(display_clock: str | None) -> int | None:
@@ -100,7 +130,9 @@ def _parse_event(event: dict, league_slug: str) -> ESPNMatch | None:
         away = next(c for c in competitors if c["homeAway"] == "away")
 
         status_obj = event["status"]
-        status_name = status_obj["type"]["name"]
+        status_type = status_obj.get("type") or {}
+        status_name = status_type.get("name", "")
+        status_state = status_type.get("state")  # 'pre' | 'in' | 'post'
 
         kickoff = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
 
@@ -129,7 +161,7 @@ def _parse_event(event: dict, league_slug: str) -> ESPNMatch | None:
             home_team_id=str(home["team"]["id"]),
             away_team_id=str(away["team"]["id"]),
             kickoff_utc=kickoff,
-            status=_map_status(status_name),
+            status=_map_status(status_name, status_state),
             home_goals=parse_score(home.get("score")),
             away_goals=parse_score(away.get("score")),
             minute=_parse_minute(status_obj.get("displayClock")),
