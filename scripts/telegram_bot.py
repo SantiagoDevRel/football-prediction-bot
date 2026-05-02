@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from loguru import logger  # noqa: E402
 from telegram.ext import (  # noqa: E402
-    Application, CallbackQueryHandler, CommandHandler,
+    Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters,
 )
 
 from src.config import settings  # noqa: E402
@@ -26,6 +26,7 @@ from src.telegram_app.handlers import (  # noqa: E402
     cmd_envivo,
     cmd_help,
     cmd_historial,
+    cmd_natural_language,
     cmd_picks,
     cmd_resolver,
     cmd_resolver_auto,
@@ -52,6 +53,8 @@ def main() -> None:
     app.add_handler(CommandHandler("analizar", cmd_analizar))
     app.add_handler(CommandHandler("envivo", cmd_envivo))
     app.add_handler(CallbackQueryHandler(callback_handler))
+    # Free-text fallback: any non-command text goes through Claude NLU.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_natural_language))
 
     logger.info("Bot is running. Press Ctrl+C to stop.")
     app.run_polling()

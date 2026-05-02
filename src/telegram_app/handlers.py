@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from loguru import logger
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -20,6 +20,64 @@ from src.tracking.pick_logger import (
     log_pick,
     resolve_pick,
 )
+
+
+# Map slug -> human league name (mirror of daily_pipeline.LEAGUE_NAME, kept
+# here to avoid circular imports). Used by NLU filtering.
+SLUG_TO_LEAGUE_NAME = {
+    "premier_league": "Premier League",
+    "liga_betplay": "Liga BetPlay Dimayor",
+    "sudamericana": "Copa Sudamericana",
+    "libertadores": "Copa Libertadores",
+    "champions_league": "UEFA Champions League",
+}
+
+
+def _filter_value_bets(
+    value_bets: list[dict],
+    leagues: list[str] | None,
+    time_window: str,
+) -> list[dict]:
+    """Filter value-bet candidates by league slug(s) + time window.
+
+    leagues: empty/None = no filter. time_window: 'today'|'tomorrow'|'weekend'|'week'|'any'.
+    Filters defensively: invalid kickoff strings are kept (don't drop unknown).
+    """
+    out = list(value_bets)
+
+    if leagues:
+        target_names = {SLUG_TO_LEAGUE_NAME.get(s, s) for s in leagues}
+        out = [v for v in out if v.get("league") in target_names]
+
+    if time_window in ("today", "tomorrow", "weekend", "week"):
+        today = date.today()
+        if time_window == "today":
+            ok = lambda d: d == today
+        elif time_window == "tomorrow":
+            tom = today + timedelta(days=1)
+            ok = lambda d: d == tom
+        elif time_window == "weekend":
+            # Closest upcoming Sat/Sun pair (if today is in the weekend, current one)
+            wd = today.weekday()  # Mon=0..Sun=6
+            sat = today + timedelta(days=(5 - wd) % 7)
+            if wd >= 5:  # already weekend
+                sat = today - timedelta(days=wd - 5)
+            sun = sat + timedelta(days=1)
+            ok = lambda d: d in (sat, sun)
+        else:  # week
+            end = today + timedelta(days=7)
+            ok = lambda d: today <= d <= end
+
+        def _kickoff_date(v: dict) -> date | None:
+            ko = v.get("kickoff") or ""
+            try:
+                return datetime.fromisoformat(ko).date()
+            except (ValueError, TypeError):
+                return None
+
+        out = [v for v in out if (d := _kickoff_date(v)) is not None and ok(d)]
+
+    return out
 
 
 # ---------- Helpers ----------
@@ -45,6 +103,22 @@ def _humanize_kickoff(iso: str | None) -> str:
         when = _DAYS_ES[dt.weekday()]
     fecha = f"{dt.day:02d} {_MONTHS_ES[dt.month - 1]}"
     return f"{when} {dt.strftime('%H:%M')} ({fecha})"
+
+
+def _short_league_name(full_name: str) -> str:
+    """Map full league name to a short label for compact UI rendering."""
+    n = (full_name or "")
+    if "Premier" in n:
+        return "Premier"
+    if "BetPlay" in n or "Dimayor" in n:
+        return "BetPlay"
+    if "Sudamericana" in n:
+        return "Sudamericana"
+    if "Libertadores" in n:
+        return "Libertadores"
+    if "Champions" in n:
+        return "Champions"
+    return n[:14] or "?"
 
 
 def _humanize_action(market: str, selection: str, home: str, away: str) -> str:
@@ -86,7 +160,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/balance — bankroll y picks abiertas\n"
         "/historial — últimas resueltas\n"
         "/help — ver esta ayuda\n\n"
-        "<i>Apretá un botón o escribí un comando.</i>"
+        "<b>💬 También entiendo lenguaje natural:</b>\n"
+        "<i>“dame el top pick de hoy en betplay”\n"
+        "“qué hay en vivo”\n"
+        "“analiza nacional vs millonarios”\n"
+        "“cómo va mi balance”</i>\n\n"
+        "<i>Apretá un botón, escribí un comando, o dime qué querés.</i>"
     )
     keyboard = [
         [InlineKeyboardButton("📊 Picks de hoy", callback_data="cmd:picks")],
@@ -106,9 +185,33 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------- /picks ----------
 
 async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Default /picks: all leagues, all upcoming, full list."""
+    await _run_and_send_picks(update, context, leagues=[], time_window="any", top_only=False)
+
+
+async def _run_and_send_picks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    leagues: list[str],
+    time_window: str,
+    top_only: bool,
+    prefix_note: str | None = None,
+) -> None:
+    """Shared core for /picks and NLU-dispatched picks. Filters + stages + sends."""
     chat_id = str(update.effective_chat.id)
+    filter_desc = ""
+    if leagues:
+        nice = [SLUG_TO_LEAGUE_NAME.get(s, s) for s in leagues]
+        filter_desc += f" · {', '.join(nice)}"
+    if time_window != "any":
+        es = {"today": "hoy", "tomorrow": "mañana", "weekend": "finde", "week": "esta semana"}.get(time_window, time_window)
+        filter_desc += f" · {es}"
+    if top_only:
+        filter_desc += " · TOP 1"
+
     wait_msg = (
-        "⏳ Analizando partidos y cuotas (1X2 + BTTS + O/U) en Wplay…\n"
+        f"⏳ Analizando partidos y cuotas (1X2 + BTTS + O/U) en Wplay{filter_desc}…\n"
         "<i>Esto tarda ~1 minuto porque visito cada match page para sacar todos los mercados.</i>"
     )
     if update.message:
@@ -117,7 +220,31 @@ async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.callback_query.message.reply_text(wait_msg, parse_mode=ParseMode.HTML)
 
     # Import here to avoid heavy import at module load
-    from scripts.daily_pipeline import run_pipeline_core
+    from scripts.daily_pipeline import run_pipeline_core, LEAGUES as ACTIVE_LEAGUES
+
+    # Short-circuit: if user filtered ONLY by leagues not yet in the pipeline,
+    # don't waste 60s running the full scrape.
+    if leagues and all(s not in ACTIVE_LEAGUES for s in leagues):
+        nice = ", ".join(SLUG_TO_LEAGUE_NAME.get(s, s) for s in leagues)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(f"<b>⚠️ {nice} todavía no está activa en el pipeline.</b>\n"
+                  f"<i>Estoy trabajando en ella — vendrá pronto. "
+                  f"Mientras tanto preguntame por Premier, BetPlay, Sudamericana o Libertadores.</i>"),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Warn (but still run) if user filtered by a mix that includes inactive ones
+    if leagues:
+        missing = [s for s in leagues if s not in ACTIVE_LEAGUES]
+        if missing:
+            nice_missing = ", ".join(SLUG_TO_LEAGUE_NAME.get(s, s) for s in missing)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"<i>⚠️ {nice_missing}: todavía no está activa en el pipeline. Filtro las demás.</i>",
+                parse_mode=ParseMode.HTML,
+            )
 
     try:
         result = await run_pipeline_core(persist_predictions_flag=True)
@@ -126,7 +253,9 @@ async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Error corriendo pipeline: {exc}")
         return
 
-    candidates = result["value_bets"]
+    candidates = _filter_value_bets(result["value_bets"], leagues, time_window)
+    if top_only and candidates:
+        candidates = sorted(candidates, key=lambda v: -v["edge"])[:1]
     bankroll = result["bankroll_paper"]
     n_pred = len(result["predictions"])
 
@@ -160,7 +289,7 @@ async def cmd_picks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
 
     def render_pick(s: StagedPick) -> list[str]:
-        league_short = "Premier" if "Premier" in s.league else "BetPlay"
+        league_short = _short_league_name(s.league)
         action = _humanize_action(s.market, s.selection, s.home_team, s.away_team)
         casa_implied = 1.0 / s.odds
         when = _humanize_kickoff(s.kickoff_utc)
@@ -428,7 +557,7 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not live_matches:
         await update.message.reply_text(
             "<b>📺 En vivo</b>\n\n"
-            "No hay partidos en vivo en este momento (Premier League o Liga BetPlay).\n\n"
+            "No hay partidos en vivo en este momento.\n\n"
             "<i>Probá de nuevo más tarde.</i>",
             parse_mode=ParseMode.HTML,
         )
@@ -489,7 +618,7 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             logger.warning(f"live Wplay scrape failed for {lm['event_id']}: {exc}")
 
-        league_short = "Premier" if "Premier" in row["league_name"] else "BetPlay"
+        league_short = _short_league_name(row["league_name"])
         score = f"{lm['home_goals']}-{lm['away_goals']}"
         parts.append(f"<b>⚽ {lm['home_team']} {score} {lm['away_team']}</b>")
         parts.append(f"<i>{league_short} · min {lm['minute']}'</i>")
@@ -926,3 +1055,128 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == "cmd:historial":
         update_proxy = Update(update.update_id, message=query.message)
         await cmd_historial(update_proxy, context)
+
+
+# ---------- Natural-language handler (free-text messages) ----------
+
+# Lazy-init the parser once per process; reused across messages.
+_NLU_PARSER = None
+
+
+def _get_nlu_parser():
+    global _NLU_PARSER
+    if _NLU_PARSER is not None:
+        return _NLU_PARSER
+    if not settings.anthropic_api_key:
+        return None
+    try:
+        from src.llm.nlu import IntentParser
+        _NLU_PARSER = IntentParser(settings.anthropic_api_key)
+        return _NLU_PARSER
+    except Exception as exc:
+        logger.warning(f"NLU parser init failed: {exc}")
+        return None
+
+
+async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Catch-all for plain-text messages (no '/'). Uses Claude to parse intent
+    and dispatches to the appropriate command handler.
+    """
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
+    if not text:
+        return
+
+    parser = _get_nlu_parser()
+    if parser is None:
+        await update.message.reply_text(
+            "<i>Para entender mensajes en lenguaje natural necesito ANTHROPIC_API_KEY en .env. "
+            "Mientras tanto, usá los comandos slash: /picks, /envivo, /balance, /historial, "
+            "/analizar &lt;eq1&gt; &lt;eq2&gt;, /aposte &lt;n&gt;.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Show a tiny "thinking" hint so the user knows we received it
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception:
+        pass
+
+    intent = await parser.parse(text)
+    logger.info(f"NLU: '{text[:80]}' -> {intent.action} leagues={intent.leagues} time={intent.time_window} top={intent.top_only}")
+
+    # Dispatch
+    if intent.action == "picks":
+        await _run_and_send_picks(
+            update, context,
+            leagues=intent.leagues,
+            time_window=intent.time_window,
+            top_only=intent.top_only,
+        )
+        return
+
+    if intent.action == "live":
+        await cmd_envivo(update, context)
+        return
+
+    if intent.action == "balance":
+        await cmd_balance(update, context)
+        return
+
+    if intent.action == "history":
+        await cmd_historial(update, context)
+        return
+
+    if intent.action == "resolve_auto":
+        await cmd_resolver_auto(update, context)
+        return
+
+    if intent.action == "help":
+        await cmd_help(update, context)
+        return
+
+    if intent.action == "analyze":
+        # cmd_analizar reads team names from context.args; inject them.
+        home, away = intent.home_query, intent.away_query
+        if not home or not away:
+            await update.message.reply_text(
+                "<i>No identifiqué bien los dos equipos. Probá: <code>analiza Real Madrid vs Barcelona</code></i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        # context.args expects a list of word tokens (cmd_analizar joins them later)
+        original_args = context.args
+        context.args = home.split() + ["vs"] + away.split()
+        try:
+            await cmd_analizar(update, context)
+        finally:
+            context.args = original_args
+        return
+
+    if intent.action == "place_bet":
+        if intent.pick_number is None:
+            await update.message.reply_text(
+                "<i>No entendí qué número de pick querés apostar. Probá: <code>aposté el 3</code> o <code>aposté el 5 con 10000</code></i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        original_args = context.args
+        args_list = [str(intent.pick_number)]
+        if intent.stake is not None:
+            args_list.append(str(intent.stake))
+        context.args = args_list
+        try:
+            await cmd_aposte(update, context)
+        finally:
+            context.args = original_args
+        return
+
+    if intent.action == "smalltalk":
+        reply = intent.reasoning or "🙂"
+        await update.message.reply_text(reply, parse_mode=ParseMode.HTML)
+        return
+
+    # Fallback
+    await cmd_help(update, context)

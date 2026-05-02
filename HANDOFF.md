@@ -21,6 +21,24 @@ Todo se hace desde Telegram. El bot escucha 24/7 (si está activo el `FootballBo
 | `/balance` | Bankroll, picks abiertas, ROI rolling 30 días |
 | `/historial` | Últimas 10 picks resueltas con P&L y CLV |
 
+### Lenguaje natural (Claude NLU)
+
+Todo mensaje que NO empieza con `/` lo interpreta Claude Haiku 4.5 vía tool-use
+estructurado y lo despacha al comando correcto con filtros aplicados. Ejemplos:
+
+| Lo que escribes | Lo que ejecuta |
+|---|---|
+| "dame el top pick de hoy en betplay" | `/picks` filtrado por liga_betplay + today + top_only |
+| "qué hay en vivo" | `/envivo` |
+| "analiza nacional vs millonarios" | `/analizar Nacional Millonarios` |
+| "cómo voy de balance" | `/balance` |
+| "aposté el 3 con 5000" | `/aposte 3 5000` |
+| "dame algo de champions este finde" | `/picks` con filtro champions_league + weekend (warning si liga no activa) |
+| "hola, qué tal" | smalltalk con respuesta corta en español colombiano |
+
+Costo: ~$0.001 por mensaje (Haiku 4.5). Necesita `ANTHROPIC_API_KEY` en `.env`.
+Sin key, los mensajes de texto libre devuelven una nota pidiendo usar comandos slash.
+
 ---
 
 ## Activar el sistema en Windows (corre solo)
