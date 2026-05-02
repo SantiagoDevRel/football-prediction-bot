@@ -39,12 +39,13 @@ from src.llm.pick_reviewer import PickReviewer  # noqa: E402
 from src.tracking.auto_resolver import auto_resolve_paper_picks  # noqa: E402
 from src.tracking.pick_logger import get_current_bankroll, log_pick  # noqa: E402
 
-LEAGUES = ["premier_league", "liga_betplay", "sudamericana", "libertadores"]
+LEAGUES = ["premier_league", "liga_betplay", "sudamericana", "libertadores", "champions_league"]
 LEAGUE_NAME = {
     "premier_league": "Premier League",
     "liga_betplay": "Liga BetPlay Dimayor",
     "sudamericana": "Copa Sudamericana",
     "libertadores": "Copa Libertadores",
+    "champions_league": "UEFA Champions League",
 }
 ARTIFACTS = ROOT / "models_artifacts"
 
@@ -91,11 +92,19 @@ def _persist_prediction(
         )
 
 
+def _pull_window_days(slug: str) -> int:
+    """How far ahead to fetch fixtures per league. Champions matches are weekly,
+    so we look 5 days ahead to catch midweek games when the user asks on weekend."""
+    if slug == "champions_league":
+        return 5
+    return 2
+
+
 async def _pull_fixtures() -> int:
     today = date.today()
-    end = today + timedelta(days=2)
     total = 0
     for slug in LEAGUES:
+        end = today + timedelta(days=_pull_window_days(slug))
         for offset in range((end - today).days + 1):
             d = today + timedelta(days=offset)
             try:
@@ -108,9 +117,10 @@ async def _pull_fixtures() -> int:
 
 
 def _load_upcoming_matches() -> list[dict]:
-    """Return matches kicking off today or in the next 2 days."""
+    """Return matches kicking off today or in the next ~5 days (max window
+    across all leagues to ensure Champions semis/finals are included)."""
     today = date.today()
-    end = today + timedelta(days=2)
+    end = today + timedelta(days=5)
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -138,6 +148,8 @@ def _league_slug_from_name(name: str) -> str:
         return "sudamericana"
     if "Libertadores" in name:
         return "libertadores"
+    if "Champions" in name:
+        return "champions_league"
     return "liga_betplay"
 
 
@@ -288,6 +300,8 @@ def _format_pick_block(vb: dict, predictions: list, idx: int) -> list[str]:
         league_short = "Libertadores"
     elif "Sudamericana" in vb["league"]:
         league_short = "Sudamericana"
+    elif "Champions" in vb["league"]:
+        league_short = "Champions"
     else:
         league_short = vb["league"][:12]
 

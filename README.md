@@ -10,8 +10,10 @@ Sistema de predicción de partidos de fútbol con detección de **value bets** y
 
 - **Premier League** (Inglaterra) — mejor data pública (xG histórico, lineups, etc.)
 - **Liga BetPlay Dimayor** (Colombia) — más alineada con Wplay, data más escasa
+- **Copa Sudamericana** y **Copa Libertadores** (CONMEBOL)
+- **UEFA Champions League** — modelo entrenado sobre 4 temporadas (2022/23–2025/26)
 
-Vamos a comparar performance del modelo en ambas para entender dónde tiene más edge.
+Vamos a comparar performance del modelo en cada una para entender dónde tiene más edge.
 
 ---
 

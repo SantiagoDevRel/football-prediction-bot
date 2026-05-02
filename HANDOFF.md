@@ -1,7 +1,15 @@
 # Handoff
 
 **Repo:** https://github.com/SantiagoDevRel/football-prediction-bot
-**Estado:** Phase 2.5 completa. El sistema corre solo si activás los schedules.
+**Estado:** Phase 2.5 completa + Champions League integrada + NLU vía Claude. El sistema corre solo si activás los schedules.
+
+## Ligas soportadas
+
+- Premier League (Inglaterra)
+- Liga BetPlay Dimayor (Colombia)
+- Copa Sudamericana
+- Copa Libertadores
+- UEFA Champions League — agregada 2026-05-02 con 4 temporadas de histórico (2022/23–2025/26), 616 partidos finalizados, 58 equipos, modelos DC + Elo + XGBoost + Stacking entrenados en `models_artifacts/*_uefa_champions_league.pkl`.
 
 ---
 

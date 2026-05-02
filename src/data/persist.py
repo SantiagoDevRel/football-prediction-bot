@@ -38,12 +38,14 @@ def ensure_league(conn: sqlite3.Connection, slug: str, season: int) -> int:
         "liga_betplay": "Liga BetPlay Dimayor",
         "sudamericana": "Copa Sudamericana",
         "libertadores": "Copa Libertadores",
+        "champions_league": "UEFA Champions League",
     }
     country_map = {
         "premier_league": "England",
         "liga_betplay": "Colombia",
         "sudamericana": "South America",
         "libertadores": "South America",
+        "champions_league": "Europe",
     }
     cur = conn.execute(
         "SELECT id FROM leagues WHERE name = ? AND season = ?",
@@ -77,7 +79,7 @@ def _infer_season(kickoff: datetime, slug: str) -> int:
     if slug in ("liga_betplay", "sudamericana", "libertadores"):
         # South-American competitions run within a calendar year
         return kickoff.year
-    # Default European convention
+    # Default European convention (also applies to Champions League)
     return kickoff.year if kickoff.month >= 7 else kickoff.year - 1
 
 

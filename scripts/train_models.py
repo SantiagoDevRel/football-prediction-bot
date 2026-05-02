@@ -129,7 +129,8 @@ def train_for_league(league_name: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--league", default="all",
-                        choices=["premier_league", "liga_betplay", "sudamericana", "libertadores", "all"])
+                        choices=["premier_league", "liga_betplay", "sudamericana", "libertadores",
+                                 "champions_league", "all"])
     args = parser.parse_args()
 
     name_map = {
@@ -137,6 +138,7 @@ def main() -> None:
         "liga_betplay": "Liga BetPlay Dimayor",
         "sudamericana": "Copa Sudamericana",
         "libertadores": "Copa Libertadores",
+        "champions_league": "UEFA Champions League",
     }
     if args.league == "all":
         for k in name_map.values():

@@ -30,8 +30,9 @@ from playwright.async_api import Page, async_playwright
 
 
 WPLAY_LEAGUE_URLS: dict[str, str] = {
-    "premier_league": "https://apuestas.wplay.co/es/t/19157/Inglaterra-Premier-League",
-    "liga_betplay":   "https://apuestas.wplay.co/es/t/19311/Colombia-Primera-A",
+    "premier_league":   "https://apuestas.wplay.co/es/t/19157/Inglaterra-Premier-League",
+    "liga_betplay":     "https://apuestas.wplay.co/es/t/19311/Colombia-Primera-A",
+    "champions_league": "https://apuestas.wplay.co/es/t/19161/UEFA-Champions-League",
 }
 
 DEBUG_DIR = Path(__file__).resolve().parents[2] / "logs" / "wplay_debug"

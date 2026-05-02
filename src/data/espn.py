@@ -29,6 +29,7 @@ ESPN_LEAGUE_BY_SLUG: dict[str, str] = {
     "liga_betplay": "col.1",
     "sudamericana": "conmebol.sudamericana",
     "libertadores": "conmebol.libertadores",
+    "champions_league": "uefa.champions",
 }
 
 
