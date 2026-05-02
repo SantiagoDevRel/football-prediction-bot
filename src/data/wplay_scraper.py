@@ -200,46 +200,57 @@ async def _extract_from_page(page: Page, league_slug: str) -> list[WplayOdds]:
     return out
 
 
-async def scrape_league(league_slug: str, timeout_ms: int = 30_000) -> list[WplayOdds]:
+async def scrape_league(
+    league_slug: str, timeout_ms: int = 30_000, max_attempts: int = 2,
+) -> list[WplayOdds]:
     """Open a Wplay league page and return all 1X2 odds.
 
     Best-effort. Saves debug HTML+screenshot once on every run.
+
+    Retries once on nav failure or empty-DOM (Wplay sometimes serves an
+    interstitial / CDN warmup that needs a second hit).
     """
     if league_slug not in WPLAY_LEAGUE_URLS:
         raise ValueError(f"unknown league slug: {league_slug}")
     url = WPLAY_LEAGUE_URLS[league_slug]
 
-    browser, page = await _open_page()
-    try:
+    last_failure = "unknown"
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            await asyncio.sleep(3)
+        browser, page = await _open_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        except Exception as exc:
-            logger.warning(f"Wplay nav {league_slug} failed: {exc}")
-            await _save_debug(page, f"{league_slug}_nav_failed")
-            return []
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            except Exception as exc:
+                last_failure = f"nav_failed: {exc}"
+                logger.warning(f"Wplay nav {league_slug} attempt {attempt} failed: {exc}")
+                await _save_debug(page, f"{league_slug}_nav_failed_a{attempt}")
+                continue
 
-        # Wait for the match list to render. The real selector is the mkt
-        # row, not the football expander.
-        try:
-            await page.wait_for_selector("tr[data-mkt_id]", timeout=15_000)
-        except Exception:
-            logger.warning(f"[{league_slug}] no mkt rows within 15s")
-            await _save_debug(page, f"{league_slug}_no_rows")
-            return []
+            try:
+                await page.wait_for_selector("tr[data-mkt_id]", timeout=15_000)
+            except Exception:
+                last_failure = "no_mkt_rows_within_15s"
+                logger.warning(f"[{league_slug}] no mkt rows within 15s (attempt {attempt})")
+                await _save_debug(page, f"{league_slug}_no_rows_a{attempt}")
+                continue
 
-        # Settle: let ALL events render (the page may stream more via XHR)
-        await page.wait_for_timeout(2_000)
+            # Settle: let ALL events render (the page may stream more via XHR)
+            await page.wait_for_timeout(2_000)
 
-        odds = await _extract_from_page(page, league_slug)
-        logger.info(f"[{league_slug}] extracted {len(odds)} price rows")
+            odds = await _extract_from_page(page, league_slug)
+            logger.info(f"[{league_slug}] extracted {len(odds)} price rows (attempt {attempt})")
+            await _save_debug(page, f"{league_slug}_extracted")
+            return odds
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
-        await _save_debug(page, f"{league_slug}_extracted")
-        return odds
-    finally:
-        try:
-            await browser.close()
-        except Exception:
-            pass
+    logger.warning(f"[{league_slug}] all {max_attempts} attempts failed: {last_failure}")
+    return []
 
 
 async def scrape_match_markets(

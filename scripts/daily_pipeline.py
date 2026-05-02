@@ -40,9 +40,14 @@ from src.tracking.auto_resolver import auto_resolve_paper_picks  # noqa: E402
 from src.tracking.pick_logger import get_current_bankroll, log_pick  # noqa: E402
 
 LEAGUES = ["premier_league", "liga_betplay", "sudamericana", "libertadores", "champions_league"]
+# Live-only leagues: surfaced in /envivo so the user sees Colombian matches
+# outside Primera A (Primera B, Copa Colombia). No models trained → no picks.
+LIVE_ONLY_LEAGUES = ["primera_b", "copa_colombia"]
 LEAGUE_NAME = {
     "premier_league": "Premier League",
     "liga_betplay": "Liga BetPlay Dimayor",
+    "primera_b": "Primera B Colombia",
+    "copa_colombia": "Copa Colombia",
     "sudamericana": "Copa Sudamericana",
     "libertadores": "Copa Libertadores",
     "champions_league": "UEFA Champions League",
@@ -144,6 +149,10 @@ def _load_upcoming_matches() -> list[dict]:
 def _league_slug_from_name(name: str) -> str:
     if "Premier" in name:
         return "premier_league"
+    if "Primera B" in name:
+        return "primera_b"
+    if "Copa Colombia" in name:
+        return "copa_colombia"
     if "Sudamericana" in name:
         return "sudamericana"
     if "Libertadores" in name:
@@ -364,7 +373,9 @@ def _format_telegram_message(
     if not picks:
         if not wplay_odds:
             parts.extend([
-                "<i>⚠️ No pude leer cuotas de Wplay esta vez. Las predicciones quedaron en DB pero sin análisis de value.</i>"
+                "<i>⚠️ No pude leer cuotas de Wplay esta vez. Las predicciones "
+                "quedaron en DB pero sin análisis de value. Revisá "
+                "<code>logs/wplay_debug/</code> si sigue fallando.</i>"
             ])
         else:
             parts.extend([

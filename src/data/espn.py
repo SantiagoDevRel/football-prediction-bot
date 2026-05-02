@@ -27,6 +27,11 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 ESPN_LEAGUE_BY_SLUG: dict[str, str] = {
     "premier_league": "eng.1",
     "liga_betplay": "col.1",
+    # Live-only leagues: tracked for /envivo coverage of Colombian matches that
+    # don't fall under Primera A. We don't train models on these (low data
+    # quality, sparse xG) — see CLAUDE.md "no predecir mercados sin data".
+    "primera_b": "col.2",
+    "copa_colombia": "col.copa",
     "sudamericana": "conmebol.sudamericana",
     "libertadores": "conmebol.libertadores",
     "champions_league": "uefa.champions",

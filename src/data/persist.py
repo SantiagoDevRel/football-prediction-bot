@@ -36,6 +36,8 @@ def ensure_league(conn: sqlite3.Connection, slug: str, season: int) -> int:
     name_map = {
         "premier_league": "Premier League",
         "liga_betplay": "Liga BetPlay Dimayor",
+        "primera_b": "Primera B Colombia",
+        "copa_colombia": "Copa Colombia",
         "sudamericana": "Copa Sudamericana",
         "libertadores": "Copa Libertadores",
         "champions_league": "UEFA Champions League",
@@ -43,6 +45,8 @@ def ensure_league(conn: sqlite3.Connection, slug: str, season: int) -> int:
     country_map = {
         "premier_league": "England",
         "liga_betplay": "Colombia",
+        "primera_b": "Colombia",
+        "copa_colombia": "Colombia",
         "sudamericana": "South America",
         "libertadores": "South America",
         "champions_league": "Europe",
@@ -76,7 +80,7 @@ def ensure_team(conn: sqlite3.Connection, name: str, league_id: int, espn_id: st
 
 def _infer_season(kickoff: datetime, slug: str) -> int:
     """Infer the football season starting year from kickoff datetime."""
-    if slug in ("liga_betplay", "sudamericana", "libertadores"):
+    if slug in ("liga_betplay", "primera_b", "copa_colombia", "sudamericana", "libertadores"):
         # South-American competitions run within a calendar year
         return kickoff.year
     # Default European convention (also applies to Champions League)

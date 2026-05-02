@@ -110,6 +110,10 @@ def _short_league_name(full_name: str) -> str:
     n = (full_name or "")
     if "Premier" in n:
         return "Premier"
+    if "Primera B" in n:
+        return "Primera B"
+    if "Copa Colombia" in n:
+        return "Copa Colombia"
     if "BetPlay" in n or "Dimayor" in n:
         return "BetPlay"
     if "Sudamericana" in n:
@@ -266,7 +270,10 @@ async def _run_and_send_picks(
         if result["wplay_odds_count"] == 0:
             text = (
                 "⚠️ <b>No pude leer cuotas de Wplay esta vez.</b>\n"
-                "Las predicciones quedaron en DB pero no hay análisis de value."
+                "Las predicciones quedaron en DB pero no hay análisis de value.\n\n"
+                "<i>Probá de nuevo en unos minutos. Si sigue fallando, revisá "
+                "<code>logs/wplay_debug/</code> — el scraper guarda HTML "
+                "y screenshot de cada intento para diagnóstico.</i>"
             )
         else:
             text = (
@@ -521,7 +528,10 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     from src.data.wplay_scraper import scrape_match_markets
     from src.models.inplay_v0 import condition_on_state as v0_condition
     from src.models.inplay_v1 import InPlayV1
-    from scripts.daily_pipeline import _ensemble_predict, _league_slug_from_name, _load_models, LEAGUES
+    from scripts.daily_pipeline import (
+        _ensemble_predict, _load_models,
+        LEAGUE_NAME, LEAGUES, LIVE_ONLY_LEAGUES,
+    )
 
     # Lazy-fit v1 once per process
     if not hasattr(cmd_envivo, "_v1"):
@@ -539,7 +549,7 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     today = _date.today()
     live_matches: list[dict] = []
-    for slug in LEAGUES:
+    for slug in LEAGUES + LIVE_ONLY_LEAGUES:
         try:
             ms = await fetch_scoreboard(slug, today)
             bulk_upsert_espn(ms)
@@ -575,7 +585,9 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ]
 
     for lm in live_matches:
-        # Find match in DB to pull team ids
+        # Find match in DB to pull team ids (may be missing for live-only leagues
+        # where the row was just inserted on this same call — we re-query each
+        # time so primera_b / copa_colombia matches are also resolved).
         with get_conn() as conn:
             row = conn.execute(
                 """
@@ -586,14 +598,38 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                  WHERE m.api_id = ?
                 """, (int(lm["event_id"]),)
             ).fetchone()
-        if not row:
-            continue
 
         models = _load_models(lm["league_slug"])
-        if not models:
+        league_name = (
+            row["league_name"] if row else LEAGUE_NAME.get(lm["league_slug"], lm["league_slug"])
+        )
+        league_short = _short_league_name(league_name)
+        score = f"{lm['home_goals']}-{lm['away_goals']}"
+        parts.append(f"<b>⚽ {lm['home_team']} {score} {lm['away_team']}</b>")
+        parts.append(f"<i>{league_short} · min {lm['minute']}'</i>")
+
+        # No model trained for this league (Primera B, Copa Colombia, etc.) →
+        # show match info only. Per CLAUDE.md, we do NOT predict markets without
+        # quality data.
+        if not row or not models:
+            parts.append("")
+            parts.append(
+                "<i>ℹ️ Liga sin modelo entrenado — solo te muestro el live, "
+                "no hay predicción ni análisis de value.</i>")
+            parts.append("")
+            parts.append("━━━━━━━━━━━━━━━━━━━")
+            parts.append("")
             continue
+
         ensemble = _ensemble_predict(models, row["home_team_id"], row["away_team_id"])
         if ensemble is None:
+            parts.append("")
+            parts.append(
+                "<i>ℹ️ Uno de los equipos no estaba en el set de entrenamiento — "
+                "no puedo predecir este partido.</i>")
+            parts.append("")
+            parts.append("━━━━━━━━━━━━━━━━━━━")
+            parts.append("")
             continue
         avg, _ = ensemble
 
@@ -618,10 +654,6 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             logger.warning(f"live Wplay scrape failed for {lm['event_id']}: {exc}")
 
-        league_short = _short_league_name(row["league_name"])
-        score = f"{lm['home_goals']}-{lm['away_goals']}"
-        parts.append(f"<b>⚽ {lm['home_team']} {score} {lm['away_team']}</b>")
-        parts.append(f"<i>{league_short} · min {lm['minute']}'</i>")
         parts.append("")
         parts.append("<b>Predicciones del partido (final esperado)</b>")
         parts.append(
