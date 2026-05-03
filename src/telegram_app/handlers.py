@@ -625,9 +625,8 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "<b>📺 Partidos en vivo</b>",
         f"<i>{len(live_matches)} partido(s) en juego</i>",
         "",
-        f"<b>⚠️ DISCLAIMER:</b> usando <b>{inplay_label}</b>. "
-        "Es una aproximación, no un modelo neural in-play de clase mundial. "
-        "<b>Apostá CHICO en vivo.</b>",
+        f"<b>⚠️ Aviso:</b> modelo in-play <i>{inplay_label}</i>. "
+        "Las cuotas en vivo se mueven rápido — <b>apuesta chico</b> y verifica en Wplay antes.",
         "",
     ]
 
@@ -701,17 +700,9 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             logger.warning(f"live Wplay scrape failed for {lm['event_id']}: {exc}")
 
-        parts.append("")
-        parts.append("<b>Predicciones del partido (final esperado)</b>")
-        parts.append(
-            f"  1X2: H={live_pred.p_home_win:.0%} · D={live_pred.p_draw:.0%} · A={live_pred.p_away_win:.0%}"
-        )
-        parts.append(
-            f"  O/U 2.5: {live_pred.p_over_2_5:.0%} / {live_pred.p_under_2_5:.0%}  ·  "
-            f"BTTS: {live_pred.p_btts_yes:.0%} / {live_pred.p_btts_no:.0%}"
-        )
-
-        # Edge analysis if we have casa odds
+        # Compute edges + rank picks (only with casa odds)
+        ranked: list[tuple[str, str, float, float, float]] = []
+        good: list[tuple[str, str, float, float, float]] = []
         if casa:
             market_to_prob = {
                 ("1x2", "home"): live_pred.p_home_win,
@@ -726,7 +717,6 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 ("ou_3.5", "over"): live_pred.p_over_3_5,
                 ("ou_3.5", "under"): live_pred.p_under_3_5,
             }
-            ranked = []
             for (market, sel), odds_val in casa.items():
                 prob = market_to_prob.get((market, sel))
                 if prob is None or not (0.02 < prob < 0.98):
@@ -735,15 +725,67 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 ranked.append((market, sel, prob, odds_val, e))
             ranked.sort(key=lambda x: -x[4])
             good = [r for r in ranked if settings.min_edge <= r[4] <= settings.max_edge]
-            if good:
-                parts.append("")
-                parts.append("<b>💡 Posible value (con disclaimer)</b>")
-                for market, sel, prob, odds_val, e in good[:3]:
-                    action = _humanize_action(market, sel, lm["home_team"], lm["away_team"])
-                    parts.append(
-                        f"  • {action} @ <b>{odds_val:.2f}</b> "
-                        f"<i>(modelo {prob:.0%}, edge +{e*100:.0f}%)</i>"
-                    )
+
+        # Verdict block — recommended picks first
+        parts.append("")
+        if good:
+            from src.betting.kelly import kelly_stake
+            bankroll = get_current_bankroll("paper")
+            top3_live = good[:3]
+            parts.append(f"<b>✅ TOP {len(top3_live)} APUESTAS EN VIVO</b>")
+            for rank, (market, sel, prob, odds_val, e) in enumerate(top3_live, 1):
+                action = _humanize_action(market, sel, lm["home_team"], lm["away_team"])
+                # In-play: use HALF the normal Kelly (variance is higher live)
+                stake = kelly_stake(bankroll, odds_val, prob,
+                                    fraction=settings.kelly_fraction * 0.5)
+                parts.append(
+                    f"<b>{rank}.</b> {action} @ <b>{odds_val:.2f}</b>  "
+                    f"<i>edge +{e*100:.0f}% · stake ${stake:,.0f} (live ⅛ Kelly)</i>"
+                )
+        elif ranked:
+            best = ranked[0]
+            best_action = _humanize_action(best[0], best[1], lm["home_team"], lm["away_team"])
+            if best[4] > settings.max_edge:
+                parts.append(f"<b>⚠️ EDGE SOSPECHOSO</b> <i>+{best[4]*100:.0f}% sobre {best_action} — modelo desfasado del estado real.</i>")
+            else:
+                parts.append(f"<b>🛑 PASA</b> <i>— sin value (mejor edge {best[4]*100:+.0f}%). Wplay calibrada al partido.</i>")
+        elif not casa:
+            parts.append("<i>⚠️ Wplay no respondió con cuotas en vivo para este partido.</i>")
+
+        # Compact data
+        parts.append(
+            f"<b>Modelo:</b> H {live_pred.p_home_win:.0%} · X {live_pred.p_draw:.0%} · A {live_pred.p_away_win:.0%} · "
+            f"O 2.5 {live_pred.p_over_2_5:.0%} · BTTS {live_pred.p_btts_yes:.0%}"
+        )
+
+        # Claude reasoning for live (incorporates score + minute + user context)
+        if settings.anthropic_api_key:
+            try:
+                from src.llm.match_analyst import MatchAnalyst, build_context_block
+                user_msg_for_claude = (
+                    context.user_data.get("_last_user_message", "")
+                    if hasattr(context, "user_data") and context.user_data is not None else ""
+                )
+                top_picks_for_claude = good[:3] if good else None
+                kickoff_str = f"EN VIVO min {lm['minute']}' · marcador {lm['home_goals']}-{lm['away_goals']}"
+                ctx_block = build_context_block(
+                    home=lm["home_team"], away=lm["away_team"],
+                    league=league_name, kickoff=kickoff_str,
+                    p_home=live_pred.p_home_win, p_draw=live_pred.p_draw, p_away=live_pred.p_away_win,
+                    p_over_2_5=live_pred.p_over_2_5, p_btts_yes=live_pred.p_btts_yes,
+                    casa_odds=casa or None,
+                    best_pick=(good[0] if good else (ranked[0] if ranked else None)),
+                    top_picks=top_picks_for_claude,
+                    user_message=user_msg_for_claude,
+                )
+                analyst = MatchAnalyst(settings.anthropic_api_key)
+                verdict = await analyst.analyze(ctx_block)
+                icon = {"TAKE": "🟢", "PASS": "🔴", "CAUTION": "🟡"}.get(verdict.verdict, "🧠")
+                parts.append(f"{icon} <b>Claude:</b> {verdict.reasoning}")
+                if verdict.correlation_note:
+                    parts.append(f"<i>⚠️ {verdict.correlation_note}</i>")
+            except Exception as exc:
+                logger.warning(f"live match analyst failed: {exc}")
         parts.append("")
         parts.append("━━━━━━━━━━━━━━━━━━━")
         parts.append("")
@@ -1291,6 +1333,8 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if intent.action == "live":
+        if hasattr(context, "user_data") and context.user_data is not None:
+            context.user_data["_last_user_message"] = text
         await cmd_envivo(update, context)
         return
 
