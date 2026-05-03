@@ -98,10 +98,13 @@ def _persist_prediction(
 
 
 def _pull_window_days(slug: str) -> int:
-    """How far ahead to fetch fixtures per league. Champions matches are weekly,
-    so we look 5 days ahead to catch midweek games when the user asks on weekend."""
-    if slug == "champions_league":
-        return 5
+    """How far ahead to fetch fixtures per league. CONMEBOL competitions
+    (Libertadores / Sudamericana) and UEFA Champions are weekly midweek
+    games — we need 5+ days ahead so they show up when the user asks Sat/Sun
+    about Tue/Wed matches. Domestic leagues (Premier, BetPlay) play every
+    weekend so 2 days is enough."""
+    if slug in ("champions_league", "libertadores", "sudamericana"):
+        return 7
     return 2
 
 
@@ -122,10 +125,11 @@ async def _pull_fixtures() -> int:
 
 
 def _load_upcoming_matches() -> list[dict]:
-    """Return matches kicking off today or in the next ~5 days (max window
-    across all leagues to ensure Champions semis/finals are included)."""
+    """Return matches kicking off today or in the next 7 days (max window
+    across all leagues — Champions / Libertadores / Sudamericana have weekly
+    midweek matches that need to be visible from the weekend)."""
     today = date.today()
-    end = today + timedelta(days=5)
+    end = today + timedelta(days=7)
     with get_conn() as conn:
         rows = conn.execute(
             """
