@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import unicodedata
 from datetime import datetime, date, timedelta
 
 from loguru import logger
@@ -103,6 +104,52 @@ def _humanize_kickoff(iso: str | None) -> str:
         when = _DAYS_ES[dt.weekday()]
     fecha = f"{dt.day:02d} {_MONTHS_ES[dt.month - 1]}"
     return f"{when} {dt.strftime('%H:%M')} ({fecha})"
+
+
+def _strip_accents(s: str) -> str:
+    """Lowercase + strip diacritics. SQLite's LOWER doesn't do diacritics, so
+    we have to do this in Python before comparing user query to team names."""
+    s = unicodedata.normalize("NFKD", s or "")
+    return "".join(c for c in s if not unicodedata.combining(c)).lower().strip()
+
+
+# Common nicknames / city names → substring of team name in the DB.
+# Ad-hoc, expand as we find more user phrasings.
+_TEAM_ALIASES: dict[str, str] = {
+    "rionegro": "aguilas doradas",
+    "verdolaga": "atletico nacional",
+    "millos": "millonarios",
+    "albirrojo": "junior",
+    "tiburones": "junior",
+    "leones": "santa fe",
+    "dim": "independiente medellin",
+    "poderoso": "independiente medellin",
+}
+
+
+def _find_team_candidates(query_raw: str) -> list[int]:
+    """Return team ids whose normalized name contains the (normalized) query
+    OR an aliased form. Done in Python because SQLite doesn't strip accents."""
+    q = _strip_accents(query_raw)
+    if not q:
+        return []
+    # Apply aliases (substring match): if any alias key appears in the query,
+    # also search the alias's mapped form.
+    expanded = [q]
+    for alias_key, alias_target in _TEAM_ALIASES.items():
+        if alias_key in q:
+            expanded.append(alias_target)
+
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, name FROM teams").fetchall()
+    out: list[int] = []
+    for r in rows:
+        n = _strip_accents(r["name"])
+        for term in expanded:
+            if term in n or n in term:
+                out.append(r["id"])
+                break
+    return out
 
 
 def _short_league_name(full_name: str) -> str:
@@ -821,50 +868,45 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for i in range(1, len(args)):
             candidates.append((" ".join(args[:i]).lower(), " ".join(args[i:]).lower()))
 
-    rows: list = []
-    matched_query: tuple[str, str] | None = None
-    for home_q, away_q in candidates:
+    # Diacritic-safe match: build candidate team_id lists in Python
+    # (SQLite LOWER doesn't strip accents, so substring LIKE on raw text fails
+    # for "medellin" vs DB "Medellín", "aguilas" vs "Águilas Doradas", etc.)
+    def _query_by_team_ids(home_ids: list[int], away_ids: list[int]) -> list:
+        if not home_ids or not away_ids:
+            return []
+        ph_h = ",".join(["?"] * len(home_ids))
+        ph_a = ",".join(["?"] * len(away_ids))
         with get_conn() as conn:
-            r = conn.execute(
-                """
+            return conn.execute(
+                f"""
                 SELECT m.id, m.kickoff_utc, m.status, m.home_team_id, m.away_team_id,
                        h.name AS home_name, a.name AS away_name, l.name AS league
                   FROM matches m
                   JOIN teams h ON m.home_team_id = h.id
                   JOIN teams a ON m.away_team_id = a.id
                   JOIN leagues l ON m.league_id = l.id
-                 WHERE LOWER(h.name) LIKE ? AND LOWER(a.name) LIKE ?
+                 WHERE m.home_team_id IN ({ph_h}) AND m.away_team_id IN ({ph_a})
                  ORDER BY m.kickoff_utc DESC LIMIT 5
                 """,
-                (f"%{home_q}%", f"%{away_q}%"),
+                [*home_ids, *away_ids],
             ).fetchall()
+
+    rows: list = []
+    for home_q, away_q in candidates:
+        h_ids = _find_team_candidates(home_q)
+        a_ids = _find_team_candidates(away_q)
+        r = _query_by_team_ids(h_ids, a_ids)
         if r:
             rows = r
-            matched_query = (home_q, away_q)
             break
-
-    # Track the original query split (for fallbacks below)
-    home_q, away_q = matched_query if matched_query else (full, full)
 
     if not rows:
         # Try every split with home/away swapped (user may have given them backwards)
         for hq, aq in candidates:
-            with get_conn() as conn:
-                r = conn.execute(
-                    """
-                    SELECT m.id, m.kickoff_utc, m.status, m.home_team_id, m.away_team_id,
-                           h.name AS home_name, a.name AS away_name, l.name AS league
-                      FROM matches m
-                      JOIN teams h ON m.home_team_id = h.id
-                      JOIN teams a ON m.away_team_id = a.id
-                      JOIN leagues l ON m.league_id = l.id
-                     WHERE LOWER(h.name) LIKE ? AND LOWER(a.name) LIKE ?
-                     ORDER BY m.kickoff_utc DESC LIMIT 5
-                    """,
-                    (f"%{aq}%", f"%{hq}%"),
-                ).fetchall()
+            h_ids = _find_team_candidates(aq)  # swapped
+            a_ids = _find_team_candidates(hq)
+            r = _query_by_team_ids(h_ids, a_ids)
             if r:
-                # Use it but tell the user the order is inverted
                 rows = r
                 await update.message.reply_text(
                     "<i>(Invertí el orden — el partido está como visitante/local opuesto a lo que escribiste.)</i>",
