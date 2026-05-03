@@ -11,6 +11,18 @@
 - Copa Libertadores
 - UEFA Champions League — agregada 2026-05-02 con 4 temporadas de histórico (2022/23–2025/26), 616 partidos finalizados, 58 equipos, modelos DC + Elo + XGBoost + Stacking entrenados en `models_artifacts/*_uefa_champions_league.pkl`.
 
+## Fuentes de datos para razonamiento de Claude
+
+| Fuente | Para qué | Calls/día |
+|---|---|---|
+| **Wplay scraper** (`src/data/wplay_scraper.py`) | Cuotas reales para apostar (única casa donde el user opera). Pre-match `/es/t/<league>/<slug>` + live `/es/live`. | Sin límite |
+| **the-odds-api.com** (`src/data/odds_api.py`) | Multi-bookmaker consensus para Premier/Champions/Libertadores/Sudamericana (NO BetPlay). Detecta cuando Wplay es outlier. | 500/mes free |
+| **api-football.com** (`src/data/api_football.py`) | **Líneas confirmadas (XI inicial), lesiones, cuotas Pinnacle/Bet365/Unibet/etc para BetPlay**. Llena el gap multi-book en BetPlay. | 100/día free |
+| **DB local** (`src/data/match_context.py`) | Forma reciente (últimos 5) + H2H histórico (últimos 5). Cero costo. | Sin límite |
+| **ESPN scoreboard** (`src/data/espn.py`) | Marcador + minuto + status live, fixtures históricos. Cero costo. | Sin límite |
+
+`/analizar` consume ~4 calls api-football por partido (find fixture + lineups + injuries + odds). Con 100/día = ~25 análisis full por día. Quota se monitorea automático y aparece warning al log cuando quedan <10.
+
 ---
 
 ## Cómo se usa el sistema (UX completa)

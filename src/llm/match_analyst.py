@@ -112,7 +112,10 @@ def build_context_block(
     home_form: object = None,         # RecentForm | None
     away_form: object = None,
     h2h: object = None,                # HeadToHead | None
-    market_consensus: list[dict] | None = None,  # multi-bookmaker rows
+    market_consensus: list[dict] | None = None,   # multi-bookmaker rows
+    lineups: list = None,              # list[TeamLineup] from api-football
+    injuries: list = None,             # list[Injury] from api-football
+    pinnacle_consensus: list = None,   # list[OddsConsensus] from api-football
 ) -> str:
     """Format all the context into a single user message for Claude."""
     lines = [
@@ -187,7 +190,47 @@ def build_context_block(
         for r in h2h.last_results[:3]:
             lines.append(f"  · {r}")
 
-    # Multi-bookmaker consensus — flag where Wplay differs from market
+    # Lineups (api-football) — starting XI confirmed
+    if lineups:
+        lines.append("")
+        lines.append("Alineaciones confirmadas:")
+        for L in lineups:
+            xi_names = [p.name for p in (L.start_xi or [])]
+            lines.append(f"  {L.team_name} ({L.formation}) DT {L.coach_name}:")
+            if xi_names:
+                lines.append(f"    XI: {', '.join(xi_names)}")
+        lines.append("(Si en la 'Forma reciente' aparece un goleador clave que NO está en el XI, decílo claramente — afecta predicción.)")
+
+    # Injuries / suspensions (api-football)
+    if injuries:
+        lines.append("")
+        lines.append(f"Lesiones / suspensiones ({len(injuries)} reportadas):")
+        for inj in injuries[:8]:
+            lines.append(f"  · {inj.player_name} ({inj.team_name}) — {inj.type}: {inj.reason}")
+
+    # Pinnacle consensus (api-football) — gold-standard reference book
+    if pinnacle_consensus:
+        lines.append("")
+        lines.append("Cuotas multi-bookmaker (api-football, ~12 casas, incluye Pinnacle):")
+        for o in pinnacle_consensus[:8]:
+            mkt_h = _humanize_market(o.market, o.selection)
+            pin = f"Pinnacle {o.pinnacle_odds:.2f}" if o.pinnacle_odds else "(sin Pinnacle)"
+            line = f"  {mkt_h}: mediana {o.median_odds:.2f}, mejor {o.best_odds:.2f} ({o.best_bookie}), {pin}, {o.n_books} casas"
+            # Wplay comparison if we have it
+            wplay_v = (casa_odds or {}).get((o.market, o.selection))
+            if wplay_v is not None:
+                # Compare to Pinnacle (preferred reference) or median
+                ref = o.pinnacle_odds or o.median_odds
+                gap = (wplay_v - ref) / ref
+                if gap < -0.05:
+                    line += f" · ⚠️ Wplay {wplay_v:.2f} ({gap*100:+.0f}% vs ref, paga MENOS)"
+                elif gap > 0.05:
+                    line += f" · 🔥 Wplay {wplay_v:.2f} ({gap*100:+.0f}% vs ref, paga MÁS — outlier)"
+                else:
+                    line += f" · Wplay {wplay_v:.2f} (en línea con mercado)"
+            lines.append(line)
+
+    # Multi-bookmaker consensus from the-odds-api (additional source) — flag where Wplay differs
     if market_consensus:
         lines.append("")
         lines.append("Consenso de mercado (otros bookmakers):")

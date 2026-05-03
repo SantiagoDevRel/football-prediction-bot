@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # Optional: the-odds-api.com key for multi-bookmaker comparison.
     # Without this, the system runs Wplay-only (still functional).
     odds_api_key: str = ""
+    # Optional: api-sports.io v3 football key. Provides lineups, injuries,
+    # and BetPlay multi-bookmaker odds (where the-odds-api doesn't reach).
+    # Free tier: 100 requests/day. Sign up at https://dashboard.api-football.com/
+    api_football_key: str = ""
 
     # Operation mode
     betting_mode: Literal["paper", "real"] = "paper"

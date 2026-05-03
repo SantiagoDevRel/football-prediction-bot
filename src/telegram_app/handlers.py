@@ -1159,6 +1159,36 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as exc:
         logger.warning(f"form/H2H lookup failed: {exc}")
 
+    # api-football: lineups, injuries, multi-bookmaker odds (Pinnacle reference).
+    # Only enrich when match is upcoming or in-play — for finished matches the
+    # odds are stale and burning quota gives nothing.
+    api_lineups: list = []
+    api_injuries: list = []
+    api_pinnacle_consensus: list = []
+    if settings.api_football_key and status in ("scheduled", "live"):
+        try:
+            from src.data.api_football import (
+                find_fixture, fetch_lineups, fetch_injuries, fetch_odds_consensus,
+                LEAGUE_ID_BY_SLUG,
+            )
+            if league_slug in LEAGUE_ID_BY_SLUG:
+                kickoff_d = datetime.fromisoformat(target["kickoff_utc"]).date()
+                fix = await find_fixture(
+                    settings.api_football_key, kickoff_d, league_slug, home, away,
+                )
+                if fix is not None:
+                    # 3 calls: lineups, injuries, odds. Total per /analizar = ~4
+                    # (fixture lookup is cached per date).
+                    api_lineups = await fetch_lineups(settings.api_football_key, fix.fixture_id)
+                    api_injuries = await fetch_injuries(settings.api_football_key, fix.fixture_id)
+                    api_pinnacle_consensus = await fetch_odds_consensus(settings.api_football_key, fix.fixture_id)
+                    logger.info(
+                        f"[analizar] api-football enriched: lineups={len(api_lineups)} "
+                        f"injuries={len(api_injuries)} odds={len(api_pinnacle_consensus)}"
+                    )
+        except Exception as exc:
+            logger.warning(f"api-football enrichment failed: {exc}")
+
     # ---------- Build a TERSE response ----------
     when = _humanize_kickoff(target["kickoff_utc"])
 
@@ -1258,6 +1288,9 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 away_form=away_form_obj,
                 h2h=h2h_obj,
                 market_consensus=market_consensus_for_claude or None,
+                lineups=api_lineups or None,
+                injuries=api_injuries or None,
+                pinnacle_consensus=api_pinnacle_consensus or None,
             )
             analyst = MatchAnalyst(settings.anthropic_api_key)
             verdict = await analyst.analyze(ctx)
