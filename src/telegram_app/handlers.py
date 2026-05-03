@@ -1110,6 +1110,94 @@ def _get_nlu_parser():
         return None
 
 
+async def _handle_register_externals(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+    *, raw_text: str, mode_hint: str,
+) -> None:
+    """Parse a pasted Wplay block (or NL bet description), register the bets.
+
+    Always asks for confirmation before persisting if there's any low-confidence
+    selection. Otherwise persists immediately.
+    """
+    from src.tracking.external_bets import (
+        parse_pasted_text, resolve_bets, register_resolved_bets,
+    )
+
+    chat_id = update.effective_chat.id
+    mode = mode_hint if mode_hint in ("paper", "real") else "real"
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="<i>Procesando tus apuestas… (extraigo + cruzo con la base, ~10s)</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
+    if not settings.anthropic_api_key:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="<i>Necesito ANTHROPIC_API_KEY en .env para parsear apuestas pegadas.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    try:
+        parsed = await parse_pasted_text(raw_text, settings.anthropic_api_key)
+    except Exception as exc:
+        logger.exception("external bet parse failed")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"<i>Error parseando: {exc}</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not parsed:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="<i>No encontré apuestas en el texto. Pegame la confirmación de Wplay (con el detalle de cada partido) para que las pueda registrar.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    resolved, errors = resolve_bets(parsed)
+    result = register_resolved_bets(resolved, mode=mode) if resolved else None
+
+    parts: list[str] = [
+        f"<b>📝 Registré {len(result.inserted) if result else 0} apuesta(s) (modo {mode})</b>",
+        "",
+    ]
+    if result and result.inserted:
+        for pid, b in result.inserted:
+            sel_human = _humanize_action(b.market, b.selection, b.home_team, b.away_team)
+            league_short = _short_league_name(b.league)
+            parts.append(
+                f"<b>#{pid}</b> · {b.home_team} vs {b.away_team}  "
+                f"<i>({league_short})</i>"
+            )
+            parts.append(
+                f"  ➤ {sel_human} @ <b>{b.odds:.2f}</b>  ·  stake <b>${b.stake:,.0f}</b>"
+            )
+            if b.confidence < 0.95:
+                parts.append(f"  <i>⚠️ confianza {b.confidence:.0%} — {b.note}</i>")
+        parts.append("")
+
+    if errors:
+        parts.append("<b>⚠️ No pude registrar:</b>")
+        for pb, reason in errors:
+            parts.append(f"  • {pb.home_team} v {pb.away_team}: <i>{reason}</i>")
+        parts.append("")
+        parts.append("<i>Si los nombres están mal escritos o el partido no está en mi base, decime y lo agrego manual.</i>")
+
+    parts.append(
+        "<i>Cuando los partidos terminen, el auto-resolver actualiza ganada/perdida automáticamente. "
+        "También puedes hacer <code>/resolver_auto</code> para forzar.</i>"
+    )
+
+    await context.bot.send_message(
+        chat_id=chat_id, text="\n".join(parts), parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Catch-all for plain-text messages (no '/'). Uses Claude to parse intent
     and dispatches to the appropriate command handler.
@@ -1163,6 +1251,10 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if intent.action == "resolve_auto":
         await cmd_resolver_auto(update, context)
+        return
+
+    if intent.action == "register_externals":
+        await _handle_register_externals(update, context, raw_text=text, mode_hint=intent.mode_hint)
         return
 
     if intent.action == "help":

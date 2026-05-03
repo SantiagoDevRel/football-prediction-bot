@@ -26,7 +26,7 @@ from loguru import logger
 
 Action = Literal[
     "picks", "live", "analyze", "balance", "history", "place_bet",
-    "resolve_auto", "help", "smalltalk",
+    "register_externals", "resolve_auto", "help", "smalltalk",
 ]
 
 # Leagues recognized by the model. Keep in sync with daily_pipeline.LEAGUES.
@@ -51,6 +51,8 @@ class Intent:
     away_query: str = ""
     pick_number: int | None = None                     # for /place_bet
     stake: int | None = None                           # for /place_bet
+    raw_text: str = ""                                 # for /register_externals (full message)
+    mode_hint: str = ""                                # 'paper'|'real'|'' inferred for register_externals
     reasoning: str = ""                                # the model's short explanation
 
 
@@ -155,6 +157,34 @@ _TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["pick_number"],
+        },
+    },
+    {
+        "name": "register_external_bets",
+        "description": (
+            "Registra apuestas que el usuario YA hizo en Wplay (u otra casa) y "
+            "está reportando para que el bot las trackee. Usá esta herramienta "
+            "cuando el mensaje incluya: una boleta/confirmación pegada de Wplay, "
+            "frases como 'aposté X y Y', 'registra estas apuestas', 'tomá nota "
+            "de estas que ya jugué', listas con cuotas y montos. Es DISTINTO de "
+            "place_bet: place_bet registra UN pick previamente sugerido por el "
+            "bot (numerado #1..N); register_external_bets registra apuestas "
+            "externas que el usuario hizo por su cuenta, pueden ser muchas a la vez."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["real", "paper"],
+                    "description": (
+                        "'real' si el usuario apostó plata real (default — palabras como "
+                        "'aposté', 'jugué', confirmaciones de Wplay con números de boleta). "
+                        "'paper' solo si dice explícitamente 'modo paper' o 'simulación'."
+                    ),
+                },
+            },
+            "required": ["mode"],
         },
     },
     {
@@ -274,6 +304,11 @@ def _tool_block_to_intent(name: str, args: dict[str, Any]) -> Intent:
             action="place_bet",
             pick_number=int(args.get("pick_number")) if args.get("pick_number") is not None else None,
             stake=int(args.get("stake")) if args.get("stake") is not None else None,
+        )
+    if name == "register_external_bets":
+        return Intent(
+            action="register_externals",
+            mode_hint=str(args.get("mode", "real")),
         )
     if name == "resolve_pending":
         return Intent(action="resolve_auto")
