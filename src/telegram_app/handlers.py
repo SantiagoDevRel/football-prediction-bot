@@ -956,11 +956,22 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if status == "scheduled":
         try:
             league_rows = await scrape_wplay_league(league_slug)
-            target_key = (normalize_name(home), normalize_name(away))
+            db_home_norm = normalize_name(home)
+            db_away_norm = normalize_name(away)
+
+            def _team_match(db_norm: str, wplay_norm: str) -> bool:
+                """Substring-tolerant match. Wplay may add city suffixes
+                ('Águilas Doradas Rionegro' vs DB 'Águilas Doradas') or
+                drop them; either side containing the other is a match."""
+                if not db_norm or not wplay_norm:
+                    return False
+                return db_norm in wplay_norm or wplay_norm in db_norm
+
             event_id: str | None = None
             wplay_home, wplay_away = home, away
             for r in league_rows:
-                if (normalize_name(r.home_team), normalize_name(r.away_team)) == target_key:
+                if (_team_match(db_home_norm, normalize_name(r.home_team))
+                        and _team_match(db_away_norm, normalize_name(r.away_team))):
                     event_id = r.event_id
                     wplay_home, wplay_away = r.home_team, r.away_team
                     break
@@ -971,7 +982,8 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             else:
                 # Fall back: at least we have 1X2 from league_rows
                 for r in league_rows:
-                    if (normalize_name(r.home_team), normalize_name(r.away_team)) == target_key:
+                    if (_team_match(db_home_norm, normalize_name(r.home_team))
+                            and _team_match(db_away_norm, normalize_name(r.away_team))):
                         casa_odds[(r.market, r.selection)] = r.odds
         except Exception as exc:
             logger.warning(f"Wplay scrape during /analizar failed: {exc}")
@@ -1047,26 +1059,55 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         # Top picks with edge between MIN_EDGE and MAX_EDGE
         good = [r for r in ranked if settings.min_edge <= r[4] <= settings.max_edge]
+        parts.append("")
+        parts.append("━━━━━━━━━━━━━━━━━━━")
         if good:
-            parts.append("")
-            parts.append("<b>💡 Picks con value</b>")
-            for market, sel, prob, odds_val, e in good[:5]:
-                action = _humanize_action(market, sel, home, away)
-                parts.append(
-                    f"  • {action} @ <b>{odds_val:.2f}</b>  "
-                    f"<i>(modelo {prob:.0%} · edge +{e*100:.0f}%)</i>"
-                )
+            best_pick = good[0]
+            market, sel, prob, odds_val, e = best_pick
+            action = _humanize_action(market, sel, home, away)
+            from src.betting.kelly import kelly_stake
+            bankroll = get_current_bankroll("paper")
+            stake = kelly_stake(prob, odds_val, bankroll, fraction=settings.kelly_fraction)
+            parts.append(f"<b>✅ APUESTA RECOMENDADA</b>")
+            parts.append(f"➤ <b>{action}</b>  @ <b>{odds_val:.2f}</b>")
+            parts.append(
+                f"<i>Modelo {prob:.0%} · cuota implica {1/odds_val:.0%} · "
+                f"edge <b>+{e*100:.0f}%</b> · stake sugerido ${stake:,.0f} (¼ Kelly)</i>"
+            )
+            if len(good) > 1:
+                parts.append("")
+                parts.append("<i>Otras opciones con value:</i>")
+                for market, sel, prob, odds_val, e in good[1:4]:
+                    action = _humanize_action(market, sel, home, away)
+                    parts.append(
+                        f"  • {action} @ {odds_val:.2f} <i>(edge +{e*100:.0f}%)</i>"
+                    )
         elif ranked:
             best = ranked[0]
-            parts.append("")
+            best_action = _humanize_action(best[0], best[1], home, away)
             if best[4] > settings.max_edge:
+                parts.append(f"<b>⚠️ NO APUESTES</b>")
                 parts.append(
-                    f"<i>El mejor edge es +{best[4]*100:.0f}% — sospechoso. "
-                    f"Filtrado por límite de 30%.</i>"
+                    f"<i>El mejor edge es +{best[4]*100:.0f}% sobre {best_action} — "
+                    f"sospechoso, filtrado por límite de 30% (probable error del modelo).</i>"
                 )
             else:
+                # Find what the model thinks is the most likely outcome
+                top_prob_market = max(
+                    [(m, s, p) for (m, s, p) in [
+                        ("1x2", "home", avg.p_home_win),
+                        ("1x2", "draw", avg.p_draw),
+                        ("1x2", "away", avg.p_away_win),
+                    ]],
+                    key=lambda x: x[2],
+                )
+                top_action = _humanize_action(top_prob_market[0], top_prob_market[1], home, away)
+                parts.append(f"<b>🛑 PASÁ — no hay value</b>")
                 parts.append(
-                    f"<i>Mejor edge: {best[4]*100:+.0f}% — abajo del mínimo (5%). No vale apostar.</i>"
+                    f"<i>El modelo cree que lo más probable es <b>{top_action}</b> "
+                    f"({top_prob_market[2]:.0%}), pero Wplay ya lo paga ajustado. "
+                    f"El mejor edge en cualquier mercado es {best[4]*100:+.0f}% — "
+                    f"abajo del mínimo de 5% para apostar.</i>"
                 )
     else:
         parts.append("")
