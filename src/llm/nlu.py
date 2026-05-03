@@ -64,7 +64,10 @@ _TOOLS: list[dict[str, Any]] = [
         "description": (
             "Lista picks (apuestas con value) para próximos partidos. "
             "Usá esto cuando el usuario pida 'picks', 'apuestas', 'qué jugar', "
-            "'recomendaciones', 'top pick', 'mejor apuesta', etc."
+            "'recomendaciones', 'top pick', 'mejor apuesta', SIEMPRE QUE NO "
+            "haya nombrado dos equipos específicos. Si el mensaje incluye "
+            "dos clubes en estructura 'X vs Y', usá analyze_match aunque "
+            "el usuario diga la palabra 'picks'."
         ),
         "input_schema": {
             "type": "object",
@@ -112,9 +115,15 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "analyze_match",
         "description": (
-            "Análisis detallado de UN partido específico (todos los mercados). "
-            "Usá cuando mencionen dos equipos: 'analiza X vs Y', 'cómo viene X-Y', "
-            "'qué dice el modelo de Real Madrid Barcelona'."
+            "Análisis detallado de UN partido específico (todos los mercados + "
+            "cuotas + value bets para ESE partido). Usá esta tool SIEMPRE que "
+            "el mensaje mencione dos equipos específicos, sin importar qué "
+            "otras palabras tenga. Disparadores típicos: "
+            "'analiza X vs Y', 'cómo viene X-Y', 'info del Bayern PSG', "
+            "'dame picks/tips/info/recomendaciones del partido X vs Y', "
+            "'qué dice el modelo de Real Madrid Barcelona', 'el partido X y Y'. "
+            "Esta tool ES la respuesta correcta cuando el usuario quiere "
+            "información focalizada en un solo encuentro, aunque diga 'picks'."
         ),
         "input_schema": {
             "type": "object",
@@ -230,12 +239,28 @@ Contexto del bot (lo que SÍ existe):
 - Modo: paper trading.
 - El usuario es colombiano. Usa español de Colombia con TUTEO ESTRICTO en tus respuestas: "tú", "puedes", "necesitas", "quieres", "dime", "registra". NUNCA uses voseo argentino: nada de "vos", "podés", "necesitás", "querés", "decime", "registrá", "hacé". Esto aplica a smalltalk y a cualquier texto que devuelvas. Ejemplo correcto: "¿Qué necesitas? Puedes pedirme picks." Ejemplo INCORRECTO: "¿Qué necesitás? Podés pedirme picks."
 
-Reglas:
-1. Si el usuario nombra una liga, mapeala al enum exacto. Si dice algo que no existe ("La Liga", "Bundesliga"), igual elegí get_picks con leagues vacío y avisá en reasoning.
-2. Si pide "el top pick" / "el mejor" / "uno solo" → top_only=true.
-3. "finde" en Colombia = sábado y domingo (time_window="weekend").
-4. Si el mensaje no mapea a ninguna acción ejecutable, usá smalltalk con una respuesta corta.
-5. NUNCA mezcles dos acciones. Una sola tool por turno."""
+Reglas (en orden de prioridad — la regla #1 GANA sobre todas las demás):
+
+1. **DOS EQUIPOS ESPECÍFICOS = analyze_match, SIEMPRE.** Si el mensaje
+   menciona dos equipos específicos en estructura "X vs Y", "X v Y", "X y Y",
+   "X contra Y", o cualquier construcción que claramente refiera a UN
+   partido entre dos clubes nombrados, elegí analyze_match aunque el
+   mensaje también incluya las palabras "picks", "apuestas", "tips",
+   "info", "dame", etc.
+   - "dame picks de medellin vs aguilas" → analyze_match (NO get_picks)
+   - "info del bayern psg" → analyze_match
+   - "qué dice el modelo de chelsea forest" → analyze_match
+   - "tips para arsenal atlético" → analyze_match
+   El usuario quiere foco en ESE partido. get_picks tirar lista completa
+   de la liga es respuesta INCORRECTA.
+
+2. Si el usuario nombra una liga sin nombrar dos equipos específicos,
+   mapeala al enum exacto. Si dice algo que no existe ("La Liga",
+   "Bundesliga"), igual elegí get_picks con leagues vacío y avisá en reasoning.
+3. Si pide "el top pick" / "el mejor" / "uno solo" → top_only=true.
+4. "finde" en Colombia = sábado y domingo (time_window="weekend").
+5. Si el mensaje no mapea a ninguna acción ejecutable, usá smalltalk con una respuesta corta.
+6. NUNCA mezcles dos acciones. Una sola tool por turno."""
 
 
 class IntentParser:
