@@ -24,11 +24,16 @@ from loguru import logger
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
-# Map our internal league slug -> The Odds API sport_key
+# Map our internal league slug -> The Odds API sport_key.
+# NOTE: the-odds-api does NOT cover Liga BetPlay (Colombia Primera A) — for
+# BetPlay matches we rely on Wplay-only odds, but form/H2H from our DB still
+# enrich Claude's reasoning.
 SPORT_KEY_BY_SLUG = {
-    "premier_league": "soccer_epl",
-    "liga_betplay": "soccer_colombia_primera",
-    # add more as needed: spain_la_liga, italy_serie_a, etc.
+    "premier_league":   "soccer_epl",
+    "champions_league": "soccer_uefa_champs_league",
+    "libertadores":     "soccer_conmebol_copa_libertadores",
+    "sudamericana":     "soccer_conmebol_copa_sudamericana",
+    # liga_betplay: not supported on the-odds-api
 }
 
 
@@ -38,11 +43,15 @@ class MultiBookieOdds:
     home_team: str
     away_team: str
     commence_time: datetime
-    market: str          # "1x2" | "ou_2.5" | "btts" | etc.
-    selection: str       # "home" | "draw" | "away" | "over" | "under" | "yes" | "no"
+    market: str          # "1x2" | "ou_2.5" | etc. (btts NOT free-tier)
+    selection: str       # "home" | "draw" | "away" | "over" | "under"
     best_odds: float
     best_bookmaker: str  # name of the casa with the best price
     casas_seen: int      # how many bookmakers offered this market
+    # Enriched stats for Claude reasoning:
+    median_odds: float = 0.0   # market consensus
+    worst_odds: float = 0.0    # the lowest price offered
+    all_prices: list[float] | None = None  # full distribution
 
 
 def _market_label(api_market: str) -> str:
@@ -56,11 +65,15 @@ def _market_label(api_market: str) -> str:
 
 async def fetch_multi_bookie_odds(
     league_slug: str, api_key: str, regions: str = "uk,eu,us",
-    markets: str = "h2h,totals,btts",
+    markets: str = "h2h,totals",
 ) -> list[MultiBookieOdds]:
     """Hit /v4/sports/{sport_key}/odds with the given markets.
 
-    Returns the BEST price per (match, market, selection) across all bookies.
+    Free tier supports h2h (1X2) + totals (O/U) on most sports. BTTS is paid.
+
+    Returns full consensus stats (best, median, worst, all prices) per
+    (match, market, selection). Includes pre-match AND in-play if a match
+    is live when called — the API tags both with the same payload format.
     """
     sport_key = SPORT_KEY_BY_SLUG.get(league_slug)
     if not sport_key:
@@ -80,6 +93,8 @@ async def fetch_multi_bookie_odds(
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()
+            remaining = resp.headers.get("X-Requests-Remaining", "?")
+            logger.info(f"odds-api {league_slug}: {len(data)} events, quota remaining: {remaining}")
     except httpx.HTTPError as exc:
         logger.warning(f"odds-api {league_slug} failed: {exc}")
         return []
@@ -89,22 +104,19 @@ async def fetch_multi_bookie_odds(
         commence = datetime.fromisoformat(event["commence_time"].replace("Z", "+00:00"))
         home = event["home_team"]
         away = event["away_team"]
-        # bookmakers list -> markets list -> outcomes list (with name + price)
-        per_selection: dict[tuple[str, str], tuple[float, str, int]] = {}
-        # (market, selection) -> (best_price, best_bookie, casas_seen)
+        # (market, selection) -> {bookie_name: price}
+        prices_per_sel: dict[tuple[str, str], dict[str, float]] = {}
+
         for bm in event.get("bookmakers", []):
             bookie_name = bm.get("title", bm.get("key", "?"))
             for mkt in bm.get("markets", []):
                 api_market = mkt["key"]
-                # totals market repeats per line (point); pull only 2.5
-                point = mkt.get("point") if api_market == "totals" else None
                 for outcome in mkt.get("outcomes", []):
                     name = outcome.get("name", "")
                     price = float(outcome.get("price", 0))
                     if price <= 1.01:
                         continue
 
-                    # Translate to our (market, selection)
                     if api_market == "h2h":
                         if name == home:
                             sel = "home"
@@ -116,38 +128,40 @@ async def fetch_multi_bookie_odds(
                             continue
                         market_key = "1x2"
                     elif api_market == "totals":
-                        if outcome.get("point") not in (2.5, point):
-                            # The Odds API repeats point on each outcome
-                            pass
-                        if (point or outcome.get("point")) != 2.5:
+                        # totals comes with point per outcome
+                        point = outcome.get("point")
+                        # Map any half-line to ou_X.5 internal key
+                        if point in (1.5, 2.5, 3.5):
+                            market_key = f"ou_{point}"
+                        else:
                             continue
                         sel = "over" if name.lower() == "over" else "under"
-                        market_key = "ou_2.5"
-                    elif api_market == "btts":
-                        sel = "yes" if name.lower() in ("yes", "btts yes") else "no"
-                        market_key = "btts"
                     else:
                         continue
 
                     key = (market_key, sel)
-                    prev = per_selection.get(key)
-                    if prev is None or price > prev[0]:
-                        per_selection[key] = (price, bookie_name,
-                                              (prev[2] if prev else 0) + 1)
-                    else:
-                        per_selection[key] = (prev[0], prev[1], prev[2] + 1)
+                    prices_per_sel.setdefault(key, {})[bookie_name] = price
 
-        for (market_key, sel), (best_price, best_bm, casas) in per_selection.items():
+        for (market_key, sel), book_prices in prices_per_sel.items():
+            if not book_prices:
+                continue
+            sorted_prices = sorted(book_prices.values())
+            n = len(sorted_prices)
+            median_p = sorted_prices[n // 2] if n % 2 == 1 else (sorted_prices[n // 2 - 1] + sorted_prices[n // 2]) / 2
+            best_price = max(book_prices.values())
+            best_bm = max(book_prices.items(), key=lambda kv: kv[1])[0]
             out.append(MultiBookieOdds(
                 league_slug=league_slug,
                 home_team=home, away_team=away,
                 commence_time=commence,
                 market=market_key, selection=sel,
                 best_odds=best_price, best_bookmaker=best_bm,
-                casas_seen=casas,
+                casas_seen=n,
+                median_odds=median_p,
+                worst_odds=min(book_prices.values()),
+                all_prices=sorted_prices,
             ))
 
-    logger.info(f"odds-api {league_slug}: {len(data)} matches, {len(out)} best-price rows")
     return out
 
 

@@ -109,6 +109,10 @@ def build_context_block(
     best_pick: tuple[str, str, float, float, float] | None = None,
     top_picks: list[tuple[str, str, float, float, float]] | None = None,
     user_message: str = "",
+    home_form: object = None,         # RecentForm | None
+    away_form: object = None,
+    h2h: object = None,                # HeadToHead | None
+    market_consensus: list[dict] | None = None,  # multi-bookmaker rows
 ) -> str:
     """Format all the context into a single user message for Claude."""
     lines = [
@@ -156,10 +160,67 @@ def build_context_block(
     else:
         lines.append("")
         lines.append("Mejor pick numérico: ninguno con edge >= 5%.")
+    # Recent form for both teams
+    if home_form is not None:
+        lines.append("")
+        lines.append(f"Forma reciente {home} (últimos {home_form.n_matches}):")
+        lines.append(
+            f"  {home_form.streak}  · {home_form.wins}W {home_form.draws}D {home_form.losses}L "
+            f"· GF {home_form.goals_for} GA {home_form.goals_against}"
+        )
+        for s in home_form.recent_summary[:3]:
+            lines.append(f"  · {s}")
+    if away_form is not None:
+        lines.append("")
+        lines.append(f"Forma reciente {away} (últimos {away_form.n_matches}):")
+        lines.append(
+            f"  {away_form.streak}  · {away_form.wins}W {away_form.draws}D {away_form.losses}L "
+            f"· GF {away_form.goals_for} GA {away_form.goals_against}"
+        )
+        for s in away_form.recent_summary[:3]:
+            lines.append(f"  · {s}")
+
+    # Head to head
+    if h2h is not None and h2h.n_matches > 0:
+        lines.append("")
+        lines.append(f"H2H últimos {h2h.n_matches}: {home} {h2h.home_wins}-{h2h.draws}-{h2h.away_wins} {away}")
+        for r in h2h.last_results[:3]:
+            lines.append(f"  · {r}")
+
+    # Multi-bookmaker consensus — flag where Wplay differs from market
+    if market_consensus:
+        lines.append("")
+        lines.append("Consenso de mercado (otros bookmakers):")
+        for row in market_consensus[:6]:  # cap to keep prompt small
+            mkt = row.get("market", "?")
+            sel = row.get("selection", "?")
+            best = row.get("best", 0)
+            median = row.get("median", 0)
+            worst = row.get("worst", 0)
+            n = row.get("n_books", 0)
+            wplay = row.get("wplay", None)
+            line = (f"  {_humanize_market(mkt, sel)}: "
+                    f"mediana {median:.2f} (rango {worst:.2f}-{best:.2f}, {n} casas)")
+            if wplay is not None:
+                # Highlight when Wplay is way off the market
+                if wplay < median * 0.92:
+                    line += f" · ⚠️ Wplay {wplay:.2f} (paga MENOS que el mercado)"
+                elif wplay > median * 1.08:
+                    line += f" · 🔥 Wplay {wplay:.2f} (paga MÁS que el mercado — outlier)"
+                else:
+                    line += f" · Wplay {wplay:.2f}"
+            lines.append(line)
+
     if user_message:
         lines.append("")
         lines.append(f"Mensaje original del usuario: {user_message!r}")
         lines.append("(Si menciona contexto adicional — playoff, lesión, derby, clima — incorpóralo en tu reasoning.)")
+
+    lines.append("")
+    lines.append(
+        "Tu trabajo: dar el veredicto incorporando TODO el contexto (forma, H2H, "
+        "consenso de mercado, y mensaje del usuario), no solo las cifras del modelo."
+    )
     return "\n".join(lines)
 
 

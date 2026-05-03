@@ -700,6 +700,38 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as exc:
             logger.warning(f"live Wplay scrape failed for {lm['event_id']}: {exc}")
 
+        # Multi-bookmaker live consensus via odds-api (fallback when Wplay
+        # didn't return AND extra context for Claude even when it did)
+        live_market_consensus: list[dict] = []
+        from src.data.odds_api import SPORT_KEY_BY_SLUG as _SPORT_KEYS_LIVE
+        if settings.odds_api_key and lm["league_slug"] in _SPORT_KEYS_LIVE:
+            try:
+                from src.data.odds_api import fetch_multi_bookie_odds
+                api_rows = await fetch_multi_bookie_odds(
+                    lm["league_slug"], settings.odds_api_key,
+                )
+                from src.data.wplay_scraper import normalize_name as _norm
+                lm_h = _norm(lm["home_team"])
+                lm_a = _norm(lm["away_team"])
+                for row in api_rows:
+                    api_h = _norm(row.home_team)
+                    api_a = _norm(row.away_team)
+                    if not ((lm_h in api_h or api_h in lm_h) and
+                            (lm_a in api_a or api_a in lm_a)):
+                        continue
+                    wplay_price = casa.get((row.market, row.selection))
+                    live_market_consensus.append({
+                        "market": row.market, "selection": row.selection,
+                        "best": row.best_odds, "median": row.median_odds,
+                        "worst": row.worst_odds, "n_books": row.casas_seen,
+                        "best_bookie": row.best_bookmaker,
+                        "wplay": wplay_price,
+                    })
+                    if wplay_price is None:
+                        casa[(row.market, row.selection)] = row.best_odds
+            except Exception as exc:
+                logger.warning(f"odds-api in /envivo failed: {exc}")
+
         # Compute edges + rank picks (only with casa odds)
         ranked: list[tuple[str, str, float, float, float]] = []
         good: list[tuple[str, str, float, float, float]] = []
@@ -758,7 +790,19 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             f"O 2.5 {live_pred.p_over_2_5:.0%} · BTTS {live_pred.p_btts_yes:.0%}"
         )
 
-        # Claude reasoning for live (incorporates score + minute + user context)
+        # Recent form + H2H for context
+        live_home_form = None
+        live_away_form = None
+        live_h2h = None
+        try:
+            from src.data.match_context import recent_form, head_to_head
+            live_home_form = recent_form(row["home_team_id"], n=5)
+            live_away_form = recent_form(row["away_team_id"], n=5)
+            live_h2h = head_to_head(row["home_team_id"], row["away_team_id"], n=5)
+        except Exception:
+            pass
+
+        # Claude reasoning for live (uses ALL enriched context)
         if settings.anthropic_api_key:
             try:
                 from src.llm.match_analyst import MatchAnalyst, build_context_block
@@ -777,6 +821,10 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     best_pick=(good[0] if good else (ranked[0] if ranked else None)),
                     top_picks=top_picks_for_claude,
                     user_message=user_msg_for_claude,
+                    home_form=live_home_form,
+                    away_form=live_away_form,
+                    h2h=live_h2h,
+                    market_consensus=live_market_consensus or None,
                 )
                 analyst = MatchAnalyst(settings.anthropic_api_key)
                 verdict = await analyst.analyze(ctx_block)
@@ -1030,6 +1078,50 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as exc:
             logger.warning(f"Wplay scrape during /analizar failed: {exc}")
 
+    # Multi-bookmaker consensus (odds-api): always fetch if key is configured.
+    # Used both as fallback when Wplay didn't return AND as Claude context.
+    market_consensus_for_claude: list[dict] = []
+    from src.data.odds_api import SPORT_KEY_BY_SLUG as _SPORT_KEYS
+    if settings.odds_api_key and league_slug in _SPORT_KEYS:
+        try:
+            from src.data.odds_api import fetch_multi_bookie_odds
+            api_rows = await fetch_multi_bookie_odds(league_slug, settings.odds_api_key)
+            db_home_norm = normalize_name(home)
+            db_away_norm = normalize_name(away)
+            for row in api_rows:
+                api_h = normalize_name(row.home_team)
+                api_a = normalize_name(row.away_team)
+                hit = (db_home_norm in api_h or api_h in db_home_norm) and \
+                      (db_away_norm in api_a or api_a in db_away_norm)
+                if not hit:
+                    continue
+                wplay_price = casa_odds.get((row.market, row.selection))
+                market_consensus_for_claude.append({
+                    "market": row.market, "selection": row.selection,
+                    "best": row.best_odds, "median": row.median_odds,
+                    "worst": row.worst_odds, "n_books": row.casas_seen,
+                    "best_bookie": row.best_bookmaker,
+                    "wplay": wplay_price,
+                })
+                # Fallback: if Wplay didn't have this selection, use the BEST
+                # market price as a stand-in for value detection.
+                if wplay_price is None:
+                    casa_odds[(row.market, row.selection)] = row.best_odds
+        except Exception as exc:
+            logger.warning(f"odds-api in /analizar failed: {exc}")
+
+    # Recent form + H2H for Claude context
+    home_form_obj = None
+    away_form_obj = None
+    h2h_obj = None
+    try:
+        from src.data.match_context import recent_form, head_to_head
+        home_form_obj = recent_form(target["home_team_id"], n=5)
+        away_form_obj = recent_form(target["away_team_id"], n=5)
+        h2h_obj = head_to_head(target["home_team_id"], target["away_team_id"], n=5)
+    except Exception as exc:
+        logger.warning(f"form/H2H lookup failed: {exc}")
+
     # ---------- Build a TERSE response ----------
     when = _humanize_kickoff(target["kickoff_utc"])
 
@@ -1111,7 +1203,7 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"A {casa_odds.get(('1x2','away'), '—')}"
         )
 
-    # Claude reasoning (uses the user's original message for context)
+    # Claude reasoning (uses ALL context: user msg, form, H2H, market consensus)
     if settings.anthropic_api_key:
         try:
             from src.llm.match_analyst import MatchAnalyst, build_context_block
@@ -1125,6 +1217,10 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 best_pick=best_for_claude,
                 top_picks=top_picks_for_claude,
                 user_message=user_msg_for_claude,
+                home_form=home_form_obj,
+                away_form=away_form_obj,
+                h2h=h2h_obj,
+                market_consensus=market_consensus_for_claude or None,
             )
             analyst = MatchAnalyst(settings.anthropic_api_key)
             verdict = await analyst.analyze(ctx)
