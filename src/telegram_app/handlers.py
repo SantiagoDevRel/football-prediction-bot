@@ -1027,12 +1027,23 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if good:
         from src.betting.kelly import kelly_stake
         bankroll = get_current_bankroll("paper")
-        market, sel, prob, odds_val, e = good[0]
-        # Note: kelly_stake signature is (bankroll, odds, probability, ...)
-        stake = kelly_stake(bankroll, odds_val, prob, fraction=settings.kelly_fraction)
-        action = _humanize_action(market, sel, home, away)
-        parts.append(f"<b>✅ APUESTA: {action} @ {odds_val:.2f}</b>")
-        parts.append(f"<i>Edge +{e*100:.0f}% · stake ${stake:,.0f} (¼ Kelly)</i>")
+        # Top 3 picks ordered by edge desc — let user pick which to take
+        top3 = good[:3]
+        parts.append(f"<b>✅ TOP {len(top3)} APUESTAS RECOMENDADAS</b>")
+        parts.append("")
+        for rank, (market, sel, prob, odds_val, e) in enumerate(top3, 1):
+            action = _humanize_action(market, sel, home, away)
+            stake = kelly_stake(bankroll, odds_val, prob, fraction=settings.kelly_fraction)
+            implied = 1.0 / odds_val
+            parts.append(
+                f"<b>{rank}.</b> {action} @ <b>{odds_val:.2f}</b>"
+            )
+            parts.append(
+                f"   <i>modelo {prob:.0%} vs Wplay {implied:.0%} · "
+                f"edge <b>+{e*100:.0f}%</b> · stake ${stake:,.0f}</i>"
+            )
+        parts.append("")
+        parts.append("<i>(Stakes son individuales. Si tomas las 3, exposición = suma. Algunas pueden estar correlacionadas — Claude aclara abajo.)</i>")
     elif ranked:
         best = ranked[0]
         if best[4] > settings.max_edge:
@@ -1063,12 +1074,14 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             from src.llm.match_analyst import MatchAnalyst, build_context_block
             user_msg_for_claude = context.user_data.get("_last_user_message", "") if hasattr(context, "user_data") else ""
+            top_picks_for_claude = good[:3] if good else None
             ctx = build_context_block(
                 home=home, away=away, league=league, kickoff=when,
                 p_home=avg.p_home_win, p_draw=avg.p_draw, p_away=avg.p_away_win,
                 p_over_2_5=avg.p_over_2_5, p_btts_yes=avg.p_btts_yes,
                 casa_odds=casa_odds or None,
                 best_pick=best_for_claude,
+                top_picks=top_picks_for_claude,
                 user_message=user_msg_for_claude,
             )
             analyst = MatchAnalyst(settings.anthropic_api_key)
@@ -1076,6 +1089,8 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             icon = {"TAKE": "🟢", "PASS": "🔴", "CAUTION": "🟡"}.get(verdict.verdict, "🧠")
             parts.append("")
             parts.append(f"{icon} <b>Claude:</b> {verdict.reasoning}")
+            if verdict.correlation_note:
+                parts.append(f"<i>⚠️ {verdict.correlation_note}</i>")
         except Exception as exc:
             logger.warning(f"match analyst failed: {exc}")
 

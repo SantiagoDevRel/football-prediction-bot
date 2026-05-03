@@ -22,6 +22,7 @@ class MatchVerdict:
     reasoning: str        # 2-3 sentences in Spanish
     suggested_market: str = ""    # e.g. "Santa Fe @ 1.94" if verdict=TAKE
     overrides_model: bool = False  # true if Claude flags the math is misleading
+    correlation_note: str = ""    # warning if multiple picks are correlated
 
 
 SYSTEM_PROMPT = """Eres un analista de apuestas deportivas. El bot ya hizo el cálculo numérico (modelo + cuotas) y te pasa los resultados. Tu trabajo es dar un veredicto SHORT y RAZONADO en español colombiano (tuteo ESTRICTO).
@@ -36,12 +37,13 @@ Información que recibes:
 - Partido (equipos, liga, hora)
 - Probabilidades del modelo (1X2, O/U 2.5, BTTS)
 - Cuotas Wplay
-- Mejor pick numérico encontrado (con edge) si lo hay
+- HASTA 3 picks numéricos ordenados por edge (los más recomendados)
 - El mensaje original del usuario (puede tener contexto adicional como "el que gane clasifica", "X está lesionado", "es derby")
 
 Tu output:
-1. UN veredicto: "TAKE" (apostá), "PASS" (no apostés), o "CAUTION" (apostá pero stake reducido)
+1. UN veredicto general: "TAKE" (las picks valen), "PASS" (saltá todo), o "CAUTION" (mejor sólo la #1).
 2. Razonamiento de 2-3 oraciones MAX. Incorpora el contexto del usuario si es relevante. Sé directo, sin rodeos. No repitas las cifras (ya las muestra el bot arriba).
+3. Si hay varias picks correlacionadas (ej. "Local gana" + "Más 1.5 goles" — si el local gana suele ser con goles), avisá en correlation_note. Si el usuario las apuesta todas, no diversifica de verdad.
 
 Ejemplos:
 - "TAKE — Santa Fe es claro favorito en El Campín. El edge de 21% es real porque Wplay subestima la diferencia con Inter Bogotá, que ha venido jugando con suplentes."
@@ -77,6 +79,10 @@ _TOOL = {
                 "type": "boolean",
                 "description": "True si tu razonamiento contradice el cálculo matemático del bot por contexto cualitativo (ej: lesión clave que el modelo no ve).",
             },
+            "correlation_note": {
+                "type": "string",
+                "description": "Si las picks ofrecidas están correlacionadas entre sí (ej. 1X2 home + Más 1.5 + BTTS sí — todas dependen de que el local marque), una frase corta avisando. Vacío si son independientes o si solo hay una pick.",
+            },
         },
         "required": ["verdict", "reasoning"],
     },
@@ -101,6 +107,7 @@ def build_context_block(
     p_over_2_5: float, p_btts_yes: float,
     casa_odds: dict[tuple[str, str], float] | None = None,
     best_pick: tuple[str, str, float, float, float] | None = None,
+    top_picks: list[tuple[str, str, float, float, float]] | None = None,
     user_message: str = "",
 ) -> str:
     """Format all the context into a single user message for Claude."""
@@ -131,7 +138,15 @@ def build_context_block(
             lines.append(
                 f"  BTTS sí {casa_odds[('btts','yes')]} / no {casa_odds[('btts','no')]}"
             )
-    if best_pick:
+    if top_picks:
+        lines.append("")
+        lines.append(f"Top {len(top_picks)} picks numéricos (ordenadas por edge):")
+        for i, (market, sel, prob, odds, e) in enumerate(top_picks, 1):
+            lines.append(
+                f"  {i}. {_humanize_market(market, sel)} @ {odds:.2f} "
+                f"(modelo {prob:.0%}, edge +{e*100:.0f}%)"
+            )
+    elif best_pick:
         market, sel, prob, odds, e = best_pick
         lines.append("")
         lines.append(
@@ -179,4 +194,5 @@ class MatchAnalyst:
             reasoning=str(a.get("reasoning", ""))[:500],
             suggested_market=str(a.get("suggested_market", "")),
             overrides_model=bool(a.get("overrides_model", False)),
+            correlation_note=str(a.get("correlation_note", ""))[:200],
         )
