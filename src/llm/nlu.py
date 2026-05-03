@@ -26,7 +26,8 @@ from loguru import logger
 
 Action = Literal[
     "picks", "live", "analyze", "balance", "history", "place_bet",
-    "register_externals", "resolve_auto", "help", "smalltalk",
+    "register_externals", "resolve_auto", "set_bankroll", "open_positions",
+    "help", "smalltalk",
 ]
 
 # Leagues recognized by the model. Keep in sync with daily_pipeline.LEAGUES.
@@ -52,7 +53,8 @@ class Intent:
     pick_number: int | None = None                     # for /place_bet
     stake: int | None = None                           # for /place_bet
     raw_text: str = ""                                 # for /register_externals (full message)
-    mode_hint: str = ""                                # 'paper'|'real'|'' inferred for register_externals
+    mode_hint: str = ""                                # 'paper'|'real'|'' inferred
+    bankroll_amount: int | None = None                 # for set_bankroll
     reasoning: str = ""                                # the model's short explanation
 
 
@@ -197,6 +199,48 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "set_bankroll",
+        "description": (
+            "Setea el bankroll (saldo) actual del usuario. Disparadores típicos: "
+            "'tengo 1500000 en wplay', 'mi saldo es X', 'tengo X de bankroll', "
+            "'mi bankroll real es X', 'cargá X como saldo', 'deposité X'. "
+            "El monto representa la PLATA EN EFECTIVO en la cuenta del usuario "
+            "AHORA (lo que ve en Wplay), NO el total histórico ni el total con "
+            "apuestas abiertas incluidas."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "amount": {
+                    "type": "integer",
+                    "description": (
+                        "Monto en COP, sin símbolos ni separadores. "
+                        "'1.500.000' / '1,500,000' / '1500k' / '1.5M' → 1500000."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["real", "paper"],
+                    "description": (
+                        "'real' (default) si el usuario habla de plata real. "
+                        "'paper' solo si dice explícitamente 'modo paper' o 'simulación'."
+                    ),
+                },
+            },
+            "required": ["amount"],
+        },
+    },
+    {
+        "name": "get_open_positions",
+        "description": (
+            "Lista todas las picks abiertas del usuario (no resueltas) con su "
+            "payout potencial y exposición total. Disparadores: 'qué tengo "
+            "abierto', 'mis apuestas pendientes', 'cuánto tengo en juego', "
+            "'cuáles me faltan resolver', 'qué cosas tengo pegadas'."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "resolve_pending",
         "description": (
             "Resuelve picks de partidos ya terminados. Usá cuando pidan "
@@ -335,6 +379,14 @@ def _tool_block_to_intent(name: str, args: dict[str, Any]) -> Intent:
             action="register_externals",
             mode_hint=str(args.get("mode", "real")),
         )
+    if name == "set_bankroll":
+        return Intent(
+            action="set_bankroll",
+            bankroll_amount=int(args.get("amount")) if args.get("amount") is not None else None,
+            mode_hint=str(args.get("mode", "real")),
+        )
+    if name == "get_open_positions":
+        return Intent(action="open_positions")
     if name == "resolve_pending":
         return Intent(action="resolve_auto")
     if name == "show_help":

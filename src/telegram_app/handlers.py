@@ -512,52 +512,79 @@ async def cmd_resolver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from src.betting.risk_manager import risk_summary
-    chat_id = str(update.effective_chat.id)
-    bankroll = get_current_bankroll("paper")
-    metrics = compute_rolling_metrics("paper", days=30)
-    risk = risk_summary("paper")
+    paper_bankroll = get_current_bankroll("paper")
+    real_bankroll = get_current_bankroll("real")
+    metrics_paper = compute_rolling_metrics("paper", days=30)
+    metrics_real = compute_rolling_metrics("real", days=30)
 
-    # Open picks (logged but not resolved)
+    # Open picks split by mode
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT id, market, selection, odds_taken, stake, placed_at,
+            SELECT id, mode, market, selection, odds_taken, stake, placed_at,
                    (SELECT name FROM teams WHERE id = (SELECT home_team_id FROM matches WHERE id = picks.match_id)) AS home,
                    (SELECT name FROM teams WHERE id = (SELECT away_team_id FROM matches WHERE id = picks.match_id)) AS away
-            FROM picks WHERE mode = 'paper' AND won IS NULL
+            FROM picks WHERE won IS NULL
             ORDER BY placed_at DESC
             """
         ).fetchall()
     open_picks = [dict(r) for r in rows]
+    open_real = [p for p in open_picks if p["mode"] == "real"]
+    open_paper = [p for p in open_picks if p["mode"] == "paper"]
+    real_exposure = sum(float(p["stake"]) for p in open_real)
+    real_potential = sum(float(p["stake"]) * float(p["odds_taken"]) for p in open_real)
 
-    parts = [
-        "<b>💰 Tu balance</b>",
-        "",
-        f"<b>Bankroll:</b> ${bankroll:,.0f} COP",
-        f"<b>Pico histórico:</b> ${risk['peak']:,.0f} (drawdown {risk['drawdown_pct']*100:.1f}%)",
-        f"<b>Picks abiertas:</b> {len(open_picks)}",
-        "",
-        "<b>Últimos 30 días:</b>",
-        f"• Apuestas resueltas: {metrics['n']}",
-        f"• Win rate: {metrics['win_rate']:.1%}",
-        f"• ROI sobre stakes: {metrics['roi']:+.1%}",
-        f"• P&L: ${metrics['total_pnl']:+,.0f}",
-        "",
-        "<b>Gestión de riesgo:</b>",
-        f"• Stakes hoy: ${risk['stakes_today']:,.0f} de ${risk['daily_remaining']:,.0f} restantes",
-        f"• Stop-loss: {'🔴 ACTIVO' if risk['stop_loss_active'] else '🟢 ok'} "
-        f"(drawdown threshold {risk['stop_loss_threshold']*100:.0f}%)",
-        f"• Pérdidas seguidas: {risk['consecutive_losses']} (cooldown a partir de {risk['cooldown_threshold']})",
-    ]
-    if open_picks:
-        parts.append("")
-        parts.append("<b>Picks abiertas:</b>")
-        for p in open_picks[:10]:
+    parts = ["<b>💰 Balance</b>", ""]
+
+    # Real mode (only if user has activity in real mode)
+    has_real_activity = (real_bankroll != 0) or open_real or metrics_real["n"] > 0
+    if has_real_activity:
+        parts.append(f"<b>💵 REAL · saldo: ${real_bankroll:,.0f} COP</b>")
+        if open_real:
             parts.append(
-                f"• #{p['id']} {p['home']} vs {p['away']} · "
-                f"{p['market']}:{p['selection']} @ {p['odds_taken']:.2f} · "
-                f"${p['stake']:,.0f}"
+                f"  · {len(open_real)} pick(s) abierta(s) — "
+                f"<b>${real_exposure:,.0f}</b> en juego, "
+                f"payout potencial total: <b>${real_potential:,.0f}</b>"
             )
+        if metrics_real["n"] > 0:
+            parts.append(
+                f"  · 30d: {metrics_real['n']} resueltas · "
+                f"WR {metrics_real['win_rate']:.0%} · "
+                f"ROI {metrics_real['roi']:+.1%} · "
+                f"P&amp;L <b>${metrics_real['total_pnl']:+,.0f}</b>"
+            )
+        parts.append("")
+
+    # Paper mode
+    parts.append(f"<b>📝 PAPER · ${paper_bankroll:,.0f} COP</b>")
+    if open_paper:
+        parts.append(f"  · {len(open_paper)} pick(s) abierta(s)")
+    if metrics_paper["n"] > 0:
+        parts.append(
+            f"  · 30d: {metrics_paper['n']} resueltas · "
+            f"WR {metrics_paper['win_rate']:.0%} · "
+            f"ROI {metrics_paper['roi']:+.1%} · "
+            f"P&amp;L ${metrics_paper['total_pnl']:+,.0f}"
+        )
+
+    if not has_real_activity:
+        parts.append("")
+        parts.append(
+            "<i>💡 Si quieres trackear plata real, decime: "
+            "<code>tengo 1500000 en wplay</code></i>"
+        )
+
+    if open_real:
+        parts.append("")
+        parts.append("<b>📋 Picks reales abiertas:</b>")
+        for p in open_real:
+            potential = float(p["stake"]) * float(p["odds_taken"])
+            parts.append(
+                f"  #{p['id']} {p['home']} vs {p['away']}\n"
+                f"     {p['market']}:{p['selection']} @ {p['odds_taken']:.2f} · "
+                f"<b>${p['stake']:,.0f}</b> → si gana <b>${potential:,.0f}</b>"
+            )
+
     await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
 
 
@@ -1459,6 +1486,126 @@ async def _handle_register_externals(
     )
 
 
+async def _handle_set_bankroll(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+    *, amount: int, mode: str,
+) -> None:
+    """Insert a bankroll_history snapshot row that rebases the user's balance
+    to the declared amount. Future pick log/resolve walks from this number."""
+    if amount is None or amount <= 0:
+        await update.message.reply_text(
+            "<i>No entendí el monto. Probá: <code>tengo 1500000 en wplay</code></i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if mode not in ("paper", "real"):
+        mode = "real"
+    prev = get_current_bankroll(mode)
+    delta = amount - prev
+    note = f"user-declared {mode} saldo: ${amount:,.0f}"
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO bankroll_history (mode, pick_id, delta, balance, note) "
+            "VALUES (?, NULL, ?, ?, ?)",
+            (mode, delta, amount, note),
+        )
+
+    # Sum exposure of any open picks in that mode
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) c, COALESCE(SUM(stake), 0) s FROM picks "
+            "WHERE mode = ? AND won IS NULL",
+            (mode,),
+        ).fetchone()
+    n_open = int(row["c"])
+    open_stake = float(row["s"])
+
+    msg = [
+        f"<b>✅ Saldo {mode} seteado a ${amount:,.0f} COP</b>",
+        "",
+        f"<i>De ahora en adelante, las apuestas que registres en modo "
+        f"<b>{mode}</b> descuentan stake de este saldo y los wins lo aumentan.</i>",
+    ]
+    if n_open > 0:
+        msg.append("")
+        msg.append(
+            f"<b>📋 {n_open} pick(s) {mode} abierta(s)</b>: ${open_stake:,.0f} ya están "
+            f"comprometidos. Tu saldo en Wplay (${amount:,.0f}) es DESPUÉS de "
+            f"descontar esos stakes — es lo correcto. Cuando resuelvan, los "
+            f"wins suman al saldo."
+        )
+    await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
+
+
+async def _handle_open_positions(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """List all open picks (real + paper) with potential payout."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT p.id, p.mode, p.market, p.selection, p.odds_taken, p.stake,
+                   m.kickoff_utc, m.status, m.home_goals, m.away_goals,
+                   h.name AS home, a.name AS away, l.name AS league
+              FROM picks p
+              JOIN matches m ON p.match_id = m.id
+              JOIN teams h ON m.home_team_id = h.id
+              JOIN teams a ON m.away_team_id = a.id
+              JOIN leagues l ON m.league_id = l.id
+             WHERE p.won IS NULL
+             ORDER BY m.kickoff_utc ASC
+            """
+        ).fetchall()
+    open_picks = [dict(r) for r in rows]
+    if not open_picks:
+        await update.message.reply_text(
+            "<i>No tienes picks abiertas. Todas están resueltas o aún no has apostado.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    real_picks = [p for p in open_picks if p["mode"] == "real"]
+    paper_picks = [p for p in open_picks if p["mode"] == "paper"]
+    total_real_stake = sum(float(p["stake"]) for p in real_picks)
+    total_real_potential = sum(float(p["stake"]) * float(p["odds_taken"]) for p in real_picks)
+
+    parts = [f"<b>📋 Picks abiertas ({len(open_picks)} total)</b>", ""]
+
+    if real_picks:
+        parts.append(f"<b>💵 REAL ({len(real_picks)})</b> · "
+                     f"${total_real_stake:,.0f} en juego · "
+                     f"si todas ganan: <b>${total_real_potential:,.0f}</b>")
+        parts.append("")
+        for p in real_picks:
+            potential = float(p["stake"]) * float(p["odds_taken"])
+            sel_human = _humanize_action(p["market"], p["selection"], p["home"], p["away"])
+            when = _humanize_kickoff(p["kickoff_utc"])
+            score = ""
+            if p["status"] == "live" and p["home_goals"] is not None:
+                score = f" · 📺 vivo {p['home_goals']}-{p['away_goals']}"
+            parts.append(
+                f"<b>#{p['id']}</b> {p['home']} vs {p['away']} · <i>{when}</i>{score}"
+            )
+            parts.append(
+                f"   ➤ {sel_human} @ <b>{p['odds_taken']:.2f}</b>  ·  "
+                f"stake <b>${p['stake']:,.0f}</b>  →  si gana <b>${potential:,.0f}</b>"
+            )
+        parts.append("")
+
+    if paper_picks:
+        parts.append(f"<b>📝 PAPER ({len(paper_picks)})</b>")
+        for p in paper_picks[:5]:
+            sel_human = _humanize_action(p["market"], p["selection"], p["home"], p["away"])
+            parts.append(
+                f"  #{p['id']} {p['home']} vs {p['away']} · "
+                f"{sel_human} @ {p['odds_taken']:.2f} · ${p['stake']:,.0f}"
+            )
+        if len(paper_picks) > 5:
+            parts.append(f"  <i>... y {len(paper_picks)-5} más en paper</i>")
+
+    await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
+
+
 async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Catch-all for plain-text messages (no '/'). Uses Claude to parse intent
     and dispatches to the appropriate command handler.
@@ -1518,6 +1665,18 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if intent.action == "register_externals":
         await _handle_register_externals(update, context, raw_text=text, mode_hint=intent.mode_hint)
+        return
+
+    if intent.action == "set_bankroll":
+        await _handle_set_bankroll(
+            update, context,
+            amount=intent.bankroll_amount or 0,
+            mode=intent.mode_hint or "real",
+        )
+        return
+
+    if intent.action == "open_positions":
+        await _handle_open_positions(update, context)
         return
 
     if intent.action == "help":
