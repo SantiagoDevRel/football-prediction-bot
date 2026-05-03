@@ -620,6 +620,10 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
+    # Drop any stale per-chat in-play cache so this call hits Wplay fresh.
+    if hasattr(context, "user_data") and context.user_data is not None:
+        context.user_data.pop("_inplay_rows_cache", None)
+
     # Match each live event to our DB so we can pull team_ids -> models
     parts = [
         "<b>📺 Partidos en vivo</b>",
@@ -690,15 +694,48 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         # Try to fetch live Wplay odds for this match
         casa: dict[tuple[str, str], float] = {}
+        # Bug fix: lm["event_id"] is an ESPN id, but scrape_match_markets needs
+        # the Wplay event id. Wplay drops live matches off the league page,
+        # so we hit /es/live (scrape_inplay) instead — that lists matches
+        # currently in play across all sports with their Wplay event_ids.
         try:
-            full = await scrape_match_markets(
-                lm["event_id"], lm["league_slug"],
-                lm["home_team"], lm["away_team"],
+            from src.data.wplay_scraper import (
+                scrape_inplay as _scrape_wplay_inplay, normalize_name as _wnorm,
             )
-            for o in full:
-                casa[(o.market, o.selection)] = o.odds
+            # Cache per /envivo invocation so we don't scrape /es/live N times
+            inplay_rows = context.user_data.get("_inplay_rows_cache") if hasattr(context, "user_data") and context.user_data is not None else None
+            if inplay_rows is None:
+                inplay_rows = await _scrape_wplay_inplay()
+                if hasattr(context, "user_data") and context.user_data is not None:
+                    context.user_data["_inplay_rows_cache"] = inplay_rows
+            db_h_norm = _wnorm(lm["home_team"])
+            db_a_norm = _wnorm(lm["away_team"])
+            wplay_event_id: str | None = None
+            wplay_h, wplay_a = lm["home_team"], lm["away_team"]
+            for r in inplay_rows:
+                rh = _wnorm(r.home_team)
+                ra = _wnorm(r.away_team)
+                if ((db_h_norm in rh or rh in db_h_norm)
+                        and (db_a_norm in ra or ra in db_a_norm)):
+                    wplay_event_id = r.event_id
+                    wplay_h, wplay_a = r.home_team, r.away_team
+                    casa[(r.market, r.selection)] = r.odds  # baseline 1X2 from /es/live
+                    break
+            if wplay_event_id:
+                full = await scrape_match_markets(
+                    wplay_event_id, lm["league_slug"], wplay_h, wplay_a,
+                )
+                for o in full:
+                    casa[(o.market, o.selection)] = o.odds
+            else:
+                logger.warning(
+                    f"[envivo] could not resolve Wplay event_id for "
+                    f"{lm['home_team']} v {lm['away_team']}"
+                )
         except Exception as exc:
             logger.warning(f"live Wplay scrape failed for {lm['event_id']}: {exc}")
+        # Clear the cache at the end of cmd_envivo (after the full loop) — done by
+        # the for-loop completion when context.user_data is dropped or via TTL.
 
         # Multi-bookmaker live consensus via odds-api (fallback when Wplay
         # didn't return AND extra context for Claude even when it did)

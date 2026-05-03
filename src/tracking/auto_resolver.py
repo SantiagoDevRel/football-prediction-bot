@@ -103,18 +103,19 @@ async def auto_resolve_paper_picks(notify_callback=None) -> list[dict]:
 
     Returns list of resolved-pick dicts (for logging/inspection).
     """
-    # Find pending picks (won IS NULL) older than now (no future picks resolve early)
+    # Find pending picks (won IS NULL) — both paper AND real modes.
+    # External Wplay bets registered via /aposte/paste arrive as mode='real'.
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT p.id, p.match_id, p.market, p.selection, p.odds_taken, p.stake,
+            SELECT p.id, p.match_id, p.market, p.selection, p.odds_taken, p.stake, p.mode,
                    m.status, m.home_goals, m.away_goals, m.kickoff_utc,
                    h.name AS home_name, a.name AS away_name
               FROM picks p
               JOIN matches m ON p.match_id = m.id
               LEFT JOIN teams h ON m.home_team_id = h.id
               LEFT JOIN teams a ON m.away_team_id = a.id
-             WHERE p.mode = 'paper' AND p.won IS NULL
+             WHERE p.won IS NULL
              ORDER BY m.kickoff_utc ASC
             """
         ).fetchall()

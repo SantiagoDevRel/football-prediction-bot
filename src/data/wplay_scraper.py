@@ -200,6 +200,59 @@ async def _extract_from_page(page: Page, league_slug: str) -> list[WplayOdds]:
     return out
 
 
+WPLAY_INPLAY_URL = "https://apuestas.wplay.co/es/live"
+
+
+async def scrape_inplay() -> list[WplayOdds]:
+    """Scrape Wplay's in-play (live) section and return 1X2-shaped odds for
+    every match currently being played. Wplay drops live matches off the
+    league page, so /envivo can't resolve them via scrape_league(slug).
+
+    Returns rows tagged with league_slug="live" since the page mixes leagues.
+    Caller filters by team-name match against the DB row.
+
+    Note: live 1X2 prices fluctuate; scrape close to use, don't cache.
+    """
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=["--disable-blink-features=AutomationControlled"],
+    )
+    ctx = await browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1366, "height": 900},
+        locale="es-CO",
+    )
+    page = await ctx.new_page()
+    try:
+        try:
+            await page.goto(WPLAY_INPLAY_URL, wait_until="domcontentloaded", timeout=45_000)
+        except Exception as exc:
+            logger.warning(f"inplay nav failed: {exc}")
+            return []
+        await page.wait_for_timeout(8_000)  # in-play SPA needs more time
+        try:
+            await page.wait_for_selector("tr[data-mkt_id]", timeout=15_000)
+        except Exception:
+            logger.warning("inplay: no mkt rows after 15s")
+            return []
+        odds = await _extract_from_page(page, "live")
+        logger.info(f"inplay: extracted {len(odds)} live rows")
+        return odds
+    finally:
+        try:
+            await browser.close()
+        except Exception:
+            pass
+        try:
+            await pw.stop()
+        except Exception:
+            pass
+
+
 async def scrape_league(
     league_slug: str, timeout_ms: int = 30_000, max_attempts: int = 2,
 ) -> list[WplayOdds]:
