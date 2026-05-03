@@ -988,135 +988,98 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception as exc:
             logger.warning(f"Wplay scrape during /analizar failed: {exc}")
 
-    # Build response
+    # ---------- Build a TERSE response ----------
     when = _humanize_kickoff(target["kickoff_utc"])
+
+    # Compute edges across all available markets first
+    market_to_prob: dict[tuple[str, str], float] = {
+        ("1x2", "home"): avg.p_home_win,
+        ("1x2", "draw"): avg.p_draw,
+        ("1x2", "away"): avg.p_away_win,
+        ("btts", "yes"): avg.p_btts_yes,
+        ("btts", "no"): avg.p_btts_no,
+        ("ou_1.5", "over"): avg.p_over_1_5,
+        ("ou_1.5", "under"): avg.p_under_1_5,
+        ("ou_2.5", "over"): avg.p_over_2_5,
+        ("ou_2.5", "under"): avg.p_under_2_5,
+        ("ou_3.5", "over"): avg.p_over_3_5,
+        ("ou_3.5", "under"): avg.p_under_3_5,
+    }
+    ranked: list[tuple[str, str, float, float, float]] = []
+    for (market, sel), odds_val in casa_odds.items():
+        prob = market_to_prob.get((market, sel))
+        if prob is None or not (0.02 < prob < 0.98):
+            continue
+        e = edge_fn(odds_val, prob)
+        ranked.append((market, sel, prob, odds_val, e))
+    ranked.sort(key=lambda x: -x[4])
+    good = [r for r in ranked if settings.min_edge <= r[4] <= settings.max_edge]
+    best_for_claude = good[0] if good else (ranked[0] if ranked else None)
+
+    # Header (compact)
     parts = [
         f"<b>📊 {home} vs {away}</b>",
-        f"<i>{league} · {when} · estado: {status}</i>",
+        f"<i>{league.replace('Liga ', '')} · {when}</i>",
         "",
-        "<b>Predicción del modelo</b> <i>(ensemble Dixon-Coles + Elo)</i>",
-        f"  1X2:   <b>{avg.p_home_win:.0%}</b> / <b>{avg.p_draw:.0%}</b> / <b>{avg.p_away_win:.0%}</b>",
-        f"  xG:    <b>{avg.expected_home_goals:.2f} - {avg.expected_away_goals:.2f}</b>",
-        "",
-        "<b>Mercados de goles</b>",
-        f"  Más 1.5: {avg.p_over_1_5:.0%}  ·  Menos 1.5: {avg.p_under_1_5:.0%}",
-        f"  Más 2.5: {avg.p_over_2_5:.0%}  ·  Menos 2.5: {avg.p_under_2_5:.0%}",
-        f"  Más 3.5: {avg.p_over_3_5:.0%}  ·  Menos 3.5: {avg.p_under_3_5:.0%}",
-        f"  Ambos marcan: {avg.p_btts_yes:.0%}  ·  No: {avg.p_btts_no:.0%}",
-        "",
-        "<b>Hándicap</b>",
-        f"  {home} -1.5 (gana por 2+): {avg.p_home_minus_1_5:.0%}",
-        f"  {away} +1.5: {avg.p_away_plus_1_5:.0%}",
     ]
 
-    if casa_odds:
-        # Compute edge for every market+selection combo we have casa odds for
-        market_to_prob: dict[tuple[str, str], float] = {
-            ("1x2", "home"): avg.p_home_win,
-            ("1x2", "draw"): avg.p_draw,
-            ("1x2", "away"): avg.p_away_win,
-            ("btts", "yes"): avg.p_btts_yes,
-            ("btts", "no"): avg.p_btts_no,
-            ("ou_1.5", "over"): avg.p_over_1_5,
-            ("ou_1.5", "under"): avg.p_under_1_5,
-            ("ou_2.5", "over"): avg.p_over_2_5,
-            ("ou_2.5", "under"): avg.p_under_2_5,
-            ("ou_3.5", "over"): avg.p_over_3_5,
-            ("ou_3.5", "under"): avg.p_under_3_5,
-        }
-        ranked: list[tuple[str, str, float, float, float]] = []  # market, sel, prob, odds, edge
-        for (market, sel), odds_val in casa_odds.items():
-            prob = market_to_prob.get((market, sel))
-            if prob is None or not (0.02 < prob < 0.98):
-                continue
-            e = edge_fn(odds_val, prob)
-            ranked.append((market, sel, prob, odds_val, e))
-        ranked.sort(key=lambda x: -x[4])
+    # Verdict block (FIRST so user reads it immediately)
+    if good:
+        from src.betting.kelly import kelly_stake
+        bankroll = get_current_bankroll("paper")
+        market, sel, prob, odds_val, e = good[0]
+        # Note: kelly_stake signature is (bankroll, odds, probability, ...)
+        stake = kelly_stake(bankroll, odds_val, prob, fraction=settings.kelly_fraction)
+        action = _humanize_action(market, sel, home, away)
+        parts.append(f"<b>✅ APUESTA: {action} @ {odds_val:.2f}</b>")
+        parts.append(f"<i>Edge +{e*100:.0f}% · stake ${stake:,.0f} (¼ Kelly)</i>")
+    elif ranked:
+        best = ranked[0]
+        if best[4] > settings.max_edge:
+            parts.append(f"<b>⚠️ EDGE SOSPECHOSO</b>")
+            parts.append(f"<i>+{best[4]*100:.0f}% — probable error del modelo.</i>")
+        else:
+            parts.append(f"<b>🛑 PASA — sin value</b>")
+            parts.append(f"<i>Mejor edge {best[4]*100:+.0f}%. Wplay calibrada.</i>")
+    elif not casa_odds:
+        parts.append("<i>⚠️ Sin cuotas Wplay para este partido ahora.</i>")
 
-        # Show 1X2 cuotas summary line
-        sel_to_odds_1x2 = {sel: casa_odds[("1x2", sel)] for sel in ("home", "draw", "away")
-                            if ("1x2", sel) in casa_odds}
-        if sel_to_odds_1x2:
-            parts.append("")
-            parts.append("<b>Cuotas Wplay</b>")
-            parts.append(
-                f"  1X2: H {sel_to_odds_1x2.get('home', '—')} · "
-                f"X {sel_to_odds_1x2.get('draw', '—')} · "
-                f"A {sel_to_odds_1x2.get('away', '—')}"
-            )
-            for line in (1.5, 2.5, 3.5):
-                key_o = (f"ou_{line}", "over")
-                key_u = (f"ou_{line}", "under")
-                if key_o in casa_odds and key_u in casa_odds:
-                    parts.append(
-                        f"  Más {line}: {casa_odds[key_o]:.2f} · Menos {line}: {casa_odds[key_u]:.2f}"
-                    )
-            if ("btts", "yes") in casa_odds and ("btts", "no") in casa_odds:
-                parts.append(
-                    f"  BTTS sí: {casa_odds[('btts', 'yes')]:.2f} · "
-                    f"BTTS no: {casa_odds[('btts', 'no')]:.2f}"
-                )
-
-        # Top picks with edge between MIN_EDGE and MAX_EDGE
-        good = [r for r in ranked if settings.min_edge <= r[4] <= settings.max_edge]
-        parts.append("")
-        parts.append("━━━━━━━━━━━━━━━━━━━")
-        if good:
-            best_pick = good[0]
-            market, sel, prob, odds_val, e = best_pick
-            action = _humanize_action(market, sel, home, away)
-            from src.betting.kelly import kelly_stake
-            bankroll = get_current_bankroll("paper")
-            stake = kelly_stake(prob, odds_val, bankroll, fraction=settings.kelly_fraction)
-            parts.append(f"<b>✅ APUESTA RECOMENDADA</b>")
-            parts.append(f"➤ <b>{action}</b>  @ <b>{odds_val:.2f}</b>")
-            parts.append(
-                f"<i>Modelo {prob:.0%} · cuota implica {1/odds_val:.0%} · "
-                f"edge <b>+{e*100:.0f}%</b> · stake sugerido ${stake:,.0f} (¼ Kelly)</i>"
-            )
-            if len(good) > 1:
-                parts.append("")
-                parts.append("<i>Otras opciones con value:</i>")
-                for market, sel, prob, odds_val, e in good[1:4]:
-                    action = _humanize_action(market, sel, home, away)
-                    parts.append(
-                        f"  • {action} @ {odds_val:.2f} <i>(edge +{e*100:.0f}%)</i>"
-                    )
-        elif ranked:
-            best = ranked[0]
-            best_action = _humanize_action(best[0], best[1], home, away)
-            if best[4] > settings.max_edge:
-                parts.append(f"<b>⚠️ NO APUESTES</b>")
-                parts.append(
-                    f"<i>El mejor edge es +{best[4]*100:.0f}% sobre {best_action} — "
-                    f"sospechoso, filtrado por límite de 30% (probable error del modelo).</i>"
-                )
-            else:
-                # Find what the model thinks is the most likely outcome
-                top_prob_market = max(
-                    [(m, s, p) for (m, s, p) in [
-                        ("1x2", "home", avg.p_home_win),
-                        ("1x2", "draw", avg.p_draw),
-                        ("1x2", "away", avg.p_away_win),
-                    ]],
-                    key=lambda x: x[2],
-                )
-                top_action = _humanize_action(top_prob_market[0], top_prob_market[1], home, away)
-                parts.append(f"<b>🛑 PASÁ — no hay value</b>")
-                parts.append(
-                    f"<i>El modelo cree que lo más probable es <b>{top_action}</b> "
-                    f"({top_prob_market[2]:.0%}), pero Wplay ya lo paga ajustado. "
-                    f"El mejor edge en cualquier mercado es {best[4]*100:+.0f}% — "
-                    f"abajo del mínimo de 5% para apostar.</i>"
-                )
-    else:
-        parts.append("")
+    # Compact data block
+    parts.append("")
+    parts.append(f"<b>Modelo:</b> H {avg.p_home_win:.0%} · X {avg.p_draw:.0%} · A {avg.p_away_win:.0%}")
+    parts.append(
+        f"  O 2.5: {avg.p_over_2_5:.0%} · BTTS sí: {avg.p_btts_yes:.0%} · "
+        f"xG {avg.expected_home_goals:.1f}-{avg.expected_away_goals:.1f}"
+    )
+    if casa_odds and ("1x2", "home") in casa_odds:
         parts.append(
-            "<i>(No tengo cuotas de Wplay para este partido en este momento. "
-            "Probá /picks o /analizar en pre-match cuando estén abiertas las cuotas.)</i>"
+            f"<b>Wplay:</b> H {casa_odds[('1x2','home')]:.2f} · "
+            f"X {casa_odds.get(('1x2','draw'), '—')} · "
+            f"A {casa_odds.get(('1x2','away'), '—')}"
         )
 
-    # Top scorers section (anytime scorer model)
+    # Claude reasoning (uses the user's original message for context)
+    if settings.anthropic_api_key:
+        try:
+            from src.llm.match_analyst import MatchAnalyst, build_context_block
+            user_msg_for_claude = context.user_data.get("_last_user_message", "") if hasattr(context, "user_data") else ""
+            ctx = build_context_block(
+                home=home, away=away, league=league, kickoff=when,
+                p_home=avg.p_home_win, p_draw=avg.p_draw, p_away=avg.p_away_win,
+                p_over_2_5=avg.p_over_2_5, p_btts_yes=avg.p_btts_yes,
+                casa_odds=casa_odds or None,
+                best_pick=best_for_claude,
+                user_message=user_msg_for_claude,
+            )
+            analyst = MatchAnalyst(settings.anthropic_api_key)
+            verdict = await analyst.analyze(ctx)
+            icon = {"TAKE": "🟢", "PASS": "🔴", "CAUTION": "🟡"}.get(verdict.verdict, "🧠")
+            parts.append("")
+            parts.append(f"{icon} <b>Claude:</b> {verdict.reasoning}")
+        except Exception as exc:
+            logger.warning(f"match analyst failed: {exc}")
+
+    # Top scorer (compact: just the highest-prob scorer per team)
     try:
         from src.models.player_scorers import AnytimeScorerModel
         if not hasattr(cmd_analizar, "_scorer_model"):
@@ -1124,27 +1087,19 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             sm.fit()
             cmd_analizar._scorer_model = sm
         sm = cmd_analizar._scorer_model
-        home_scorers = sm.top_scorers(target["home_team_id"], n=4,
+        home_scorers = sm.top_scorers(target["home_team_id"], n=1,
                                        match_lambda_for_team=avg.expected_home_goals)
-        away_scorers = sm.top_scorers(target["away_team_id"], n=4,
+        away_scorers = sm.top_scorers(target["away_team_id"], n=1,
                                        match_lambda_for_team=avg.expected_away_goals)
-        if home_scorers or away_scorers:
-            parts.append("")
-            parts.append("<b>👤 Anytime scorer (top candidatos)</b>")
-            for s in home_scorers:
-                parts.append(
-                    f"  <i>{home}:</i> <b>{s.player_name}</b> "
-                    f"({s.goals_scored}g) → {s.p_anytime_score:.0%}"
-                )
-            for s in away_scorers:
-                parts.append(
-                    f"  <i>{away}:</i> <b>{s.player_name}</b> "
-                    f"({s.goals_scored}g) → {s.p_anytime_score:.0%}"
-                )
-            parts.append(
-                "<i>Si Wplay paga &gt; 1/(prob mostrada), hay value. "
-                "Limitación: no sabemos si arrancan en el 11 inicial.</i>"
-            )
+        scorer_bits: list[str] = []
+        if home_scorers:
+            s = home_scorers[0]
+            scorer_bits.append(f"{s.player_name} {s.p_anytime_score:.0%}")
+        if away_scorers:
+            s = away_scorers[0]
+            scorer_bits.append(f"{s.player_name} {s.p_anytime_score:.0%}")
+        if scorer_bits:
+            parts.append(f"<i>👤 Anytime: {' · '.join(scorer_bits)}</i>")
     except Exception as exc:
         logger.warning(f"scorer model failed: {exc}")
 
@@ -1353,6 +1308,10 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode=ParseMode.HTML,
             )
             return
+        # Stash the raw user message so MatchAnalyst (Claude) can read context
+        # like "el que gane clasifica" / "X está lesionado" / "es derby".
+        if hasattr(context, "user_data") and context.user_data is not None:
+            context.user_data["_last_user_message"] = text
         # context.args expects a list of word tokens (cmd_analizar joins them later)
         original_args = context.args
         context.args = home.split() + ["vs"] + away.split()
