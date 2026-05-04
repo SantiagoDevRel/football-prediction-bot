@@ -297,8 +297,19 @@ async def _run_and_send_picks(
                 parse_mode=ParseMode.HTML,
             )
 
+    # Detect active bankroll mode: if user has declared real saldo (>0) or
+    # has unresolved real picks, size Kelly stake on REAL bankroll. Else paper.
+    real_bk = get_current_bankroll("real")
+    with get_conn() as conn:
+        n_real_open = conn.execute(
+            "SELECT COUNT(*) FROM picks WHERE mode='real' AND won IS NULL"
+        ).fetchone()[0]
+    active_mode = "real" if (real_bk > 0 or n_real_open > 0) else "paper"
+
     try:
-        result = await run_pipeline_core(persist_predictions_flag=True)
+        result = await run_pipeline_core(
+            persist_predictions_flag=True, bankroll_mode=active_mode,
+        )
     except Exception as exc:
         logger.exception("pipeline failed")
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Error corriendo pipeline: {exc}")
@@ -307,7 +318,8 @@ async def _run_and_send_picks(
     candidates = _filter_value_bets(result["value_bets"], leagues, time_window)
     if top_only and candidates:
         candidates = sorted(candidates, key=lambda v: -v["edge"])[:1]
-    bankroll = result["bankroll_paper"]
+    bankroll = result["bankroll"]
+    bankroll_mode = result.get("bankroll_mode", "paper")
     n_pred = len(result["predictions"])
 
     # Stage candidates per chat (numbered 1..N)
@@ -338,7 +350,7 @@ async def _run_and_send_picks(
 
     parts: list[str] = [
         f"<b>🎯 Picks del día</b>",
-        f"<i>Bankroll: ${bankroll:,.0f} · {n_pred} partidos analizados</i>",
+        f"<i>Bankroll {bankroll_mode}: ${bankroll:,.0f} · {n_pred} partidos analizados</i>",
         "",
     ]
 

@@ -432,7 +432,9 @@ def _format_telegram_message(
     return "\n".join(parts)
 
 
-async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
+async def run_pipeline_core(
+    *, persist_predictions_flag: bool = True, bankroll_mode: str = "paper",
+) -> dict:
     """Shared pipeline used by both the daily cron and the Telegram bot.
 
     Does NOT auto-log picks. Returns the candidates so the caller decides:
@@ -512,7 +514,9 @@ async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
                 logger.warning(f"odds-api {slug} failed: {exc}")
         logger.info(f"odds-api: {len(odds_api_data)} best-price rows")
 
-    bankroll = get_current_bankroll("paper")
+    # Kelly stake sizing uses the requested bankroll mode (paper for cron,
+    # real for the bot when the user has declared/uses real money).
+    bankroll = get_current_bankroll(bankroll_mode)
     candidates: list[dict] = []
     if wplay_odds or odds_api_data:
         # Index by (norm_home, norm_away) -> { (market, selection): (odds, source) }
@@ -583,7 +587,9 @@ async def run_pipeline_core(*, persist_predictions_flag: bool = True) -> dict:
     return {
         "predictions": predictions_summary,
         "value_bets": candidates,
-        "bankroll_paper": bankroll,
+        "bankroll": bankroll,            # the bankroll used for Kelly sizing
+        "bankroll_mode": bankroll_mode,  # "paper" or "real"
+        "bankroll_paper": bankroll,      # backward-compat alias
         "wplay_odds_count": len(wplay_odds),
         "n_fixtures": n_fixtures,
     }
