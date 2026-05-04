@@ -27,7 +27,7 @@ from loguru import logger
 Action = Literal[
     "picks", "live", "analyze", "balance", "history", "place_bet",
     "register_externals", "resolve_auto", "set_bankroll", "open_positions",
-    "help", "smalltalk",
+    "delete_pick", "help", "smalltalk",
 ]
 
 # Leagues recognized by the model. Keep in sync with daily_pipeline.LEAGUES.
@@ -231,6 +231,27 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "delete_pick",
+        "description": (
+            "Borra una pick de la base de datos. Usá cuando el usuario diga "
+            "'elimina la #N', 'borra la pick #N', 'sacá la #N', 'remove pick "
+            "X', 'esa apuesta no es mía bórrala', 'cancela la #N'. SOLO permite "
+            "borrar picks que NO están resueltas todavía. Si está resuelta, "
+            "responde con smalltalk explicando que no se puede tocar el "
+            "histórico — para eso usar resolver con override manual."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pick_id": {
+                    "type": "integer",
+                    "description": "ID de la pick a borrar. Sale del listado de picks abiertas (#15, #19, #34, etc.).",
+                },
+            },
+            "required": ["pick_id"],
+        },
+    },
+    {
         "name": "get_open_positions",
         "description": (
             "Lista todas las picks abiertas del usuario (no resueltas) con su "
@@ -259,13 +280,27 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "smalltalk",
         "description": (
-            "Charla casual o pregunta sin acción ejecutable: 'hola', 'gracias', "
-            "preguntas filosóficas sobre apuestas. Devolvé reasoning con la respuesta corta."
+            "Charla casual o pregunta que NO mapea a ninguna otra herramienta. "
+            "Antes de elegir esto, asegurate de que NINGUNA de las herramientas "
+            "anteriores aplica. Esta es el último recurso. La 'reply' debe "
+            "responder concretamente lo que el usuario pidió, no una respuesta "
+            "genérica. Si el usuario hace una pregunta sobre datos del bot "
+            "(picks, bankroll, partidos), preferí mencionar el comando exacto "
+            "que necesita en vez de inventar la respuesta."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "reply": {"type": "string", "description": "Respuesta corta y amable en español."},
+                "reply": {
+                    "type": "string",
+                    "description": (
+                        "Respuesta corta y útil en español colombiano (tuteo). "
+                        "Si el usuario pregunta algo del bot que no podés "
+                        "responder con seguridad, sugerí el comando o frase "
+                        "exacta para obtener la respuesta. Ejemplos: "
+                        "'Para ver tus picks abiertas, escribe: qué tengo abierto'."
+                    ),
+                },
             },
             "required": ["reply"],
         },
@@ -384,6 +419,11 @@ def _tool_block_to_intent(name: str, args: dict[str, Any]) -> Intent:
             action="set_bankroll",
             bankroll_amount=int(args.get("amount")) if args.get("amount") is not None else None,
             mode_hint=str(args.get("mode", "real")),
+        )
+    if name == "delete_pick":
+        return Intent(
+            action="delete_pick",
+            pick_number=int(args.get("pick_id")) if args.get("pick_id") is not None else None,
         )
     if name == "get_open_positions":
         return Intent(action="open_positions")

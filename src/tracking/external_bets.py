@@ -76,6 +76,8 @@ class RegistrationResult:
 
 PARSE_SYSTEM_PROMPT = """Eres un parser de boletas de apuestas deportivas Wplay.
 
+REGLA CRÍTICA — RECHAZA pastes parciales: si NO ves explícitamente el "Monto de Apuesta" + la "cuota" en el resumen Wplay (ej. "$50,000   4.10"), devolvé la lista vacía. Es PREFERIBLE no registrar nada que registrar mal con un stake o cuota inventados. El "Ganancia posible" / "Ganancia potencial" NO es el stake — es el payout esperado, NUNCA lo uses como monto.
+
 El usuario pega el texto completo de su confirmación. Cada apuesta puede aparecer en formato resumido o expandido. Extrae una entrada por apuesta. El formato expandido SÍ dice exactamente qué seleccionó.
 
 Formato resumido (cabecera Wplay):
@@ -156,7 +158,13 @@ _PARSE_TOOL: dict = {
 
 
 async def parse_pasted_text(text: str, anthropic_api_key: str) -> list[ParsedBet]:
-    """Use Claude Haiku 4.5 to extract bets from raw user text."""
+    """Use Claude Haiku 4.5 to extract bets from raw user text.
+
+    Defensive: drops bets that have suspicious stake or odds (e.g. cuota
+    1.00 or stake equal to a 'Ganancia posible' field). Prefer empty list
+    over registering a phantom pick like the Everton/City stake=$300k odds=1.0
+    seen earlier (parser confused 'Ganancia posible' with the stake).
+    """
     client = AsyncAnthropic(api_key=anthropic_api_key)
     msg = await client.messages.create(
         model="claude-haiku-4-5-20251001",
@@ -176,11 +184,22 @@ async def parse_pasted_text(text: str, anthropic_api_key: str) -> list[ParsedBet
     out: list[ParsedBet] = []
     for rb in raw_bets:
         try:
+            odds = float(rb["odds"])
+            stake = float(rb["stake"])
+            # Sanity guards. A real Wplay bet must have:
+            #   - cuota strictly > 1.05 (cuota 1.00 is a void/refund row, not a bet)
+            #   - stake > 0
+            if odds <= 1.05:
+                logger.warning(f"rejecting bet with invalid odds={odds}: {rb}")
+                continue
+            if stake <= 0:
+                logger.warning(f"rejecting bet with stake={stake}: {rb}")
+                continue
             out.append(ParsedBet(
                 home_team=str(rb["home_team"]).strip(),
                 away_team=str(rb["away_team"]).strip(),
-                odds=float(rb["odds"]),
-                stake=float(rb["stake"]),
+                odds=odds,
+                stake=stake,
                 market=str(rb.get("market", "1x2")),
                 selection_hint=(rb.get("selection_hint") or None),
                 raw=str(rb.get("raw_fragment", "")),
@@ -188,6 +207,23 @@ async def parse_pasted_text(text: str, anthropic_api_key: str) -> list[ParsedBet
         except (KeyError, ValueError, TypeError) as exc:
             logger.warning(f"skipping malformed parsed bet {rb}: {exc}")
     return out
+
+
+def _is_duplicate_open(match_id: int, market: str, selection: str, mode: str) -> bool:
+    """Return True if there's already an open pick on this match+market+selection
+    in the same mode. Prevents accidental double-registration (the Everton/City
+    duplicate pick #34 case)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM picks
+             WHERE match_id = ? AND market = ? AND selection = ?
+               AND mode = ? AND won IS NULL
+             LIMIT 1
+            """,
+            (match_id, market, selection, mode),
+        ).fetchone()
+    return row is not None
 
 
 # ---------- Match resolution ----------
@@ -372,11 +408,22 @@ def resolve_bets(parsed: list[ParsedBet]) -> tuple[list[ResolvedBet], list[tuple
 
 def register_resolved_bets(bets: list[ResolvedBet], mode: Mode = "real") -> RegistrationResult:
     """Insert resolved bets into the picks table with bypass_risk_check.
-    Updates bankroll history. Returns counts for the user."""
+    Updates bankroll history. Skips duplicates of currently-open picks."""
     from src.tracking.pick_logger import log_pick
 
     result = RegistrationResult()
     for b in bets:
+        # Refuse to register a duplicate open pick (same match + market + selection)
+        if _is_duplicate_open(b.match_id, b.market, b.selection, mode):
+            logger.warning(
+                f"skipping duplicate: {b.home_team} v {b.away_team} "
+                f"{b.market}:{b.selection} ({mode}) — already open"
+            )
+            result.skipped.append((
+                ParsedBet(home_team=b.home_team, away_team=b.away_team, odds=b.odds, stake=b.stake),
+                f"ya tienes una pick abierta sobre {b.market}:{b.selection} en este partido",
+            ))
+            continue
         # Build a placeholder ValueBet. model_probability=0 + edge=0 signals
         # this is a manual external bet, not a model recommendation.
         vb = ValueBet(

@@ -1537,6 +1537,81 @@ async def _handle_set_bankroll(
     await update.message.reply_text("\n".join(msg), parse_mode=ParseMode.HTML)
 
 
+async def _handle_delete_pick(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, *, pick_id: int | None,
+) -> None:
+    """Delete an unresolved pick from picks + bankroll_history, restore the
+    user's bankroll cash to before the pick was logged. Refuses to touch
+    resolved picks (those affect P&L history)."""
+    if pick_id is None or pick_id <= 0:
+        await update.message.reply_text(
+            "<i>No entendí qué pick borrar. Probá: <code>elimina la #34</code></i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT p.*, h.name AS home, a.name AS away
+              FROM picks p
+              JOIN matches m ON p.match_id = m.id
+              JOIN teams h ON m.home_team_id = h.id
+              JOIN teams a ON m.away_team_id = a.id
+             WHERE p.id = ?
+            """,
+            (pick_id,),
+        ).fetchone()
+
+    if not row:
+        await update.message.reply_text(
+            f"<i>No encontré la pick #{pick_id}. Probá <code>qué tengo abierto</code> para ver tus picks.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if row["won"] is not None:
+        await update.message.reply_text(
+            f"<b>⚠️ Pick #{pick_id} ya está resuelta</b> "
+            f"({'GANADA' if row['won'] == 1 else 'PERDIDA'}).\n"
+            f"<i>No la puedo borrar porque ya afectó el P&amp;L histórico. "
+            f"Si fue resuelta mal, decime y la corrijo manualmente.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    mode = row["mode"]
+    stake = float(row["stake"])
+    home, away = row["home"], row["away"]
+
+    # Reverse the bankroll deduction by adding the stake back, then delete
+    # the pick + its bankroll_history entry.
+    with get_conn() as conn:
+        prev = conn.execute(
+            "SELECT balance FROM bankroll_history WHERE mode = ? ORDER BY id DESC LIMIT 1",
+            (mode,),
+        ).fetchone()
+        prev_balance = float(prev["balance"]) if prev else 0.0
+        new_balance = prev_balance + stake
+        conn.execute(
+            "INSERT INTO bankroll_history (mode, pick_id, delta, balance, note) "
+            "VALUES (?, NULL, ?, ?, ?)",
+            (mode, stake, new_balance,
+             f"refund: deleted unresolved pick #{pick_id} ({home} vs {away})"),
+        )
+        conn.execute("DELETE FROM bankroll_history WHERE pick_id = ?", (pick_id,))
+        conn.execute("DELETE FROM picks WHERE id = ?", (pick_id,))
+
+    logger.info(f"deleted pick #{pick_id} (mode={mode}, stake={stake}); refunded bankroll → {new_balance}")
+    await update.message.reply_text(
+        f"<b>✅ Pick #{pick_id} eliminada</b>\n"
+        f"<i>{home} vs {away} · {row['market']}:{row['selection']} @ "
+        f"{row['odds_taken']:.2f} · stake ${stake:,.0f}</i>\n\n"
+        f"Saldo {mode} restaurado: <b>${new_balance:,.0f}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def _handle_open_positions(
     update: Update, context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
@@ -1677,6 +1752,10 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if intent.action == "open_positions":
         await _handle_open_positions(update, context)
+        return
+
+    if intent.action == "delete_pick":
+        await _handle_delete_pick(update, context, pick_id=intent.pick_number)
         return
 
     if intent.action == "help":
