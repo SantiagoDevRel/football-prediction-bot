@@ -107,14 +107,21 @@ def _humanize_kickoff(iso: str | None) -> str:
 
 
 def _strip_accents(s: str) -> str:
-    """Lowercase + strip diacritics. SQLite's LOWER doesn't do diacritics, so
-    we have to do this in Python before comparing user query to team names."""
+    """Lowercase + strip diacritics + flatten punctuation to spaces. SQLite's
+    LOWER doesn't do diacritics, and dashes/apostrophes inside team names
+    ('Paris Saint-Germain', "O'Higgins", 'Atlético-MG') break the substring
+    match unless we collapse them to whitespace."""
     s = unicodedata.normalize("NFKD", s or "")
-    return "".join(c for c in s if not unicodedata.combining(c)).lower().strip()
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    for ch in ("-", "'", "’", ".", ",", "/"):
+        s = s.replace(ch, " ")
+    return " ".join(s.split())
 
 
-# Common nicknames / city names → substring of team name in the DB.
-# Ad-hoc, expand as we find more user phrasings.
+# Common nicknames / city names / abbreviations → substring of team name in
+# the DB. Substring match in `_find_team_candidates` means the alias target
+# only needs to be contained in the DB team name (e.g. "paris saint" matches
+# "Paris Saint-Germain"). Expand as we find more user phrasings.
 _TEAM_ALIASES: dict[str, str] = {
     "rionegro": "aguilas doradas",
     "verdolaga": "atletico nacional",
@@ -124,6 +131,15 @@ _TEAM_ALIASES: dict[str, str] = {
     "leones": "santa fe",
     "dim": "independiente medellin",
     "poderoso": "independiente medellin",
+    # European / Champions abbreviations the substring match alone misses.
+    # Bayern/Inter/Juventus/Barcelona/Ajax already match by substring of
+    # their own name — only add aliases here where the user shorthand is
+    # NOT already contained in the DB name.
+    "psg": "paris saint",
+    "barca": "barcelona",
+    "barça": "barcelona",
+    "atleti": "atletico madrid",
+    "juve": "juventus",
 }
 
 
@@ -849,7 +865,8 @@ async def cmd_envivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 action = _humanize_action(market, sel, lm["home_team"], lm["away_team"])
                 # In-play: use HALF the normal Kelly (variance is higher live)
                 stake = kelly_stake(bankroll, odds_val, prob,
-                                    fraction=settings.kelly_fraction * 0.5)
+                                    fraction=settings.kelly_fraction * 0.5,
+                                    min_stake=settings.min_stake_cop)
                 parts.append(
                     f"<b>{rank}.</b> {action} @ <b>{odds_val:.2f}</b>  "
                     f"<i>edge +{e*100:.0f}% · stake ${stake:,.0f} (live ⅛ Kelly)</i>"
@@ -1277,7 +1294,9 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parts.append("")
         for rank, (market, sel, prob, odds_val, e) in enumerate(top3, 1):
             action = _humanize_action(market, sel, home, away)
-            stake = kelly_stake(bankroll, odds_val, prob, fraction=settings.kelly_fraction)
+            stake = kelly_stake(bankroll, odds_val, prob,
+                                fraction=settings.kelly_fraction,
+                                min_stake=settings.min_stake_cop)
             implied = 1.0 / odds_val
             parts.append(
                 f"<b>{rank}.</b> {action} @ <b>{odds_val:.2f}</b>"

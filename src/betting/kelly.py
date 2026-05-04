@@ -22,6 +22,7 @@ def kelly_stake(
     probability: float,
     fraction: float = 0.25,
     max_stake_pct: float = 0.05,
+    min_stake: float = 0.0,
 ) -> float:
     """Compute recommended stake.
 
@@ -31,6 +32,11 @@ def kelly_stake(
         probability: our estimated win probability
         fraction: Kelly fraction (default ¼ Kelly)
         max_stake_pct: hard cap as % of bankroll (default 5%)
+        min_stake: floor for non-zero stakes. If edge > 0 but Kelly suggests
+            less than this, snap up to min_stake (user preference: don't
+            recommend bets smaller than the floor he's willing to risk).
+            Still capped at max_stake_pct * bankroll, so we never blow past
+            the per-bet cap to honor the floor.
 
     Returns:
         Recommended stake amount (>= 0). Returns 0 if no edge.
@@ -46,7 +52,10 @@ def kelly_stake(
         return 0.0
 
     stake_fraction = min(f_star * fraction, max_stake_pct)
-    return bankroll * stake_fraction
+    stake = bankroll * stake_fraction
+    if min_stake > 0 and stake < min_stake:
+        stake = min(min_stake, bankroll * max_stake_pct)
+    return stake
 
 
 def edge(odds: float, probability: float) -> float:

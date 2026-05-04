@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # Filter them out automatically so we don't bet "too good to be true" picks.
     max_edge: float = Field(default=0.30, ge=0.0, le=1.0)
     min_confidence: float = Field(default=0.60, ge=0.0, le=1.0)
+    # Floor for any recommended stake (COP). User explicitly opted into a
+    # 50k minimum risk per bet; smaller suggestions get snapped up.
+    min_stake_cop: float = Field(default=50_000.0, ge=0.0)
 
     # Storage
     database_url: str = f"sqlite:///{ROOT_DIR / 'data' / 'db' / 'football_bot.db'}"

@@ -119,6 +119,7 @@ def detect_value(
         stake = kelly_stake(
             bankroll=bankroll, odds=line.odds, probability=prob,
             fraction=kelly_fraction, max_stake_pct=0.05,
+            min_stake=settings.min_stake_cop,
         )
         if stake <= 0:
             continue
