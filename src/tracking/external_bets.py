@@ -23,6 +23,7 @@ Limitations (acknowledged):
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import unicodedata
 from dataclasses import dataclass, field
@@ -37,6 +38,17 @@ from src.data.persist import get_conn
 
 
 Mode = Literal["paper", "real"]
+
+# Markets we accept from the parser. Goal totals + 1x2 + btts use fixed strings.
+# Córners use a dynamic line: corners_14, corners_10.5, etc.
+_FIXED_MARKETS = {"1x2", "btts", "ou_1.5", "ou_2.5", "ou_3.5"}
+_CORNERS_RE = re.compile(r"^corners_\d+(\.\d+)?$")
+
+
+def _is_valid_market(market: str) -> bool:
+    if market in _FIXED_MARKETS:
+        return True
+    return bool(_CORNERS_RE.match(market))
 
 
 @dataclass
@@ -99,6 +111,13 @@ Mapeo de "Descripción del evento" → market:
     "Menos de (2.5)" o "Más de (2.5)" → market="ou_2.5"
     "Menos de (3.5)" o "Más de (3.5)" → market="ou_3.5"
 - "Ambos equipos anotan" / "Goles de ambos equipos" → market="btts"
+- "Tiros de Esquina" / "Córners" / "Total Córners" → market="corners_<linea>"
+    donde <linea> es el número exacto de la apuesta:
+      "Menos de (14)" en córners → market="corners_14", selection_hint="under"
+      "Más de (10.5)" en córners → market="corners_10.5", selection_hint="over"
+      "Menos de (9.5)" en córners → market="corners_9.5", selection_hint="under"
+    La línea puede ser entera (14) o con .5 (10.5). NO inventes la línea —
+    extraela del paréntesis.
 
 Mapeo de "Selección" → selection_hint:
 - "Empate" → "draw"
@@ -136,8 +155,13 @@ _PARSE_TOOL: dict = {
                         "stake": {"type": "number", "description": "Plata apostada en COP, sin símbolos."},
                         "market": {
                             "type": "string",
-                            "enum": ["1x2", "btts", "ou_1.5", "ou_2.5", "ou_3.5"],
-                            "description": "Mercado. Default 1x2 si solo dice 'Ganador'.",
+                            "description": (
+                                "Mercado. Valores válidos: '1x2', 'btts', "
+                                "'ou_1.5', 'ou_2.5', 'ou_3.5', "
+                                "'corners_<linea>' (ej. 'corners_14', "
+                                "'corners_10.5', 'corners_9.5'). Default '1x2' "
+                                "si solo dice 'Ganador'."
+                            ),
                         },
                         "selection_hint": {
                             "type": ["string", "null"],
@@ -186,21 +210,26 @@ async def parse_pasted_text(text: str, anthropic_api_key: str) -> list[ParsedBet
         try:
             odds = float(rb["odds"])
             stake = float(rb["stake"])
+            market = str(rb.get("market", "1x2"))
             # Sanity guards. A real Wplay bet must have:
             #   - cuota strictly > 1.05 (cuota 1.00 is a void/refund row, not a bet)
             #   - stake > 0
+            #   - market in known whitelist or matching corners_<line> pattern
             if odds <= 1.05:
                 logger.warning(f"rejecting bet with invalid odds={odds}: {rb}")
                 continue
             if stake <= 0:
                 logger.warning(f"rejecting bet with stake={stake}: {rb}")
                 continue
+            if not _is_valid_market(market):
+                logger.warning(f"rejecting bet with unknown market={market!r}: {rb}")
+                continue
             out.append(ParsedBet(
                 home_team=str(rb["home_team"]).strip(),
                 away_team=str(rb["away_team"]).strip(),
                 odds=odds,
                 stake=stake,
-                market=str(rb.get("market", "1x2")),
+                market=market,
                 selection_hint=(rb.get("selection_hint") or None),
                 raw=str(rb.get("raw_fragment", "")),
             ))
@@ -318,6 +347,14 @@ def _infer_selection(market: str, user_odds: float, match_id: int,
     confidence, note)."""
     if hint:
         return hint, 1.0, "selección dada por el usuario"
+
+    # No hint + corners market: we don't scrape córner odds from Wplay, so
+    # cross-referencing isn't possible. Fail loudly instead of guessing.
+    if market.startswith("corners_"):
+        return "under", 0.3, (
+            "córner sin selección explícita — asumí 'menos de'; "
+            "si era 'más de' avisame y lo corrijo a mano"
+        )
 
     # Pull the latest 1X2 odds we scraped for this match.
     with get_conn() as conn:

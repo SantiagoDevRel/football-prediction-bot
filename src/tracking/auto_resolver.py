@@ -56,6 +56,11 @@ def compute_outcome(market: str, selection: str, home_goals: int, away_goals: in
             return margin >= 2
         if selection == "away":
             return margin < 2
+    # Córners: no scrapeamos final de córners aún (ESPN scoreboard no los
+    # expone). El usuario resuelve a mano con /resolver <id> ganada|perdida.
+    # Devolvemos None silenciosamente — el caller esperará al manual override.
+    if market.startswith("corners_"):
+        return None
     return None
 
 
@@ -153,10 +158,18 @@ async def auto_resolve_paper_picks(notify_callback=None) -> list[dict]:
         won = compute_outcome(p["market"], p["selection"],
                               int(m["home_goals"]), int(m["away_goals"]))
         if won is None:
-            logger.warning(
-                f"unsupported market for auto-resolve: {p['market']}:{p['selection']} "
-                f"on pick #{p['id']}"
-            )
+            # Córners y otros mercados que requieren resolución manual no son
+            # un bug — los logueamos a debug para no contaminar logs cada hora.
+            if p["market"].startswith("corners_"):
+                logger.debug(
+                    f"pick #{p['id']} ({p['market']}:{p['selection']}) "
+                    "queda abierta — córners requiere /resolver manual"
+                )
+            else:
+                logger.warning(
+                    f"unsupported market for auto-resolve: {p['market']}:{p['selection']} "
+                    f"on pick #{p['id']}"
+                )
             continue
 
         try:

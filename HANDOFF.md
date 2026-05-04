@@ -175,7 +175,13 @@ $env:PYTHONUTF8 = "1"
 - Stacking ensemble + calibración (Platt scaling)
 - Backtest robusto con CLV cuando lleguen cuotas históricas
 
-⏳ **Phase 4** — Tarjetas, córners, jugadores. Solo después de validar edge en Phase 3.
+⏳ **Phase 4** — Tarjetas, córners (predicción + auto-resolve), jugadores. Solo después de validar edge en Phase 3.
+
+**Nota:** el bot YA acepta tracking manual de apuestas de córners externas (Wplay):
+mercado `corners_<linea>` (ej. `corners_14`, `corners_10.5`) con selection
+`over`/`under`. La resolución es manual con `/resolver <pick_id> ganada|perdida`
+porque ESPN scoreboard no expone el conteo de córners. Phase 4 agregará
+auto-resolución cuando integremos una fuente de datos con córners.
 ⏳ **Phase 5** — In-play v1 real, multi-bookie.
 ⏳ **Phase 6** — Tests, re-train automático, risk mgmt, dashboard. Pre-requisito para plata real.
 

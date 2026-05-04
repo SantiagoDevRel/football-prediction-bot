@@ -190,6 +190,10 @@ def _humanize_action(market: str, selection: str, home: str, away: str) -> str:
         return "Ambos equipos marcan" if selection == "yes" else "NO marcan los dos"
     if market == "ah_-1.5":
         return f"{home} gana por 2+ goles" if selection == "home" else f"{away} no pierde por 2+"
+    if market.startswith("corners_"):
+        line = market.removeprefix("corners_")
+        side = "Más de" if selection == "over" else "Menos de"
+        return f"{side} {line} córners"
     return f"{market}:{selection}"
 
 

@@ -118,14 +118,16 @@ _TOOLS: list[dict[str, Any]] = [
         "name": "analyze_match",
         "description": (
             "Análisis detallado de UN partido específico (todos los mercados + "
-            "cuotas + value bets para ESE partido). Usá esta tool SIEMPRE que "
-            "el mensaje mencione dos equipos específicos, sin importar qué "
-            "otras palabras tenga. Disparadores típicos: "
+            "cuotas + value bets para ESE partido). Usá cuando el mensaje "
+            "mencione dos equipos específicos Y NO contenga señales de paste "
+            "de boleta (ver register_external_bets). Disparadores típicos: "
             "'analiza X vs Y', 'cómo viene X-Y', 'info del Bayern PSG', "
             "'dame picks/tips/info/recomendaciones del partido X vs Y', "
             "'qué dice el modelo de Real Madrid Barcelona', 'el partido X y Y'. "
             "Esta tool ES la respuesta correcta cuando el usuario quiere "
-            "información focalizada en un solo encuentro, aunque diga 'picks'."
+            "información focalizada en un solo encuentro, aunque diga 'picks'. "
+            "PERO si el mensaje incluye monto + cuota + verbo de registro "
+            "('aposté', 'guarda', 'registra'), elegí register_external_bets en su lugar."
         ),
         "input_schema": {
             "type": "object",
@@ -174,13 +176,21 @@ _TOOLS: list[dict[str, Any]] = [
         "name": "register_external_bets",
         "description": (
             "Registra apuestas que el usuario YA hizo en Wplay (u otra casa) y "
-            "está reportando para que el bot las trackee. Usá esta herramienta "
-            "cuando el mensaje incluya: una boleta/confirmación pegada de Wplay, "
-            "frases como 'aposté X y Y', 'registra estas apuestas', 'tomá nota "
-            "de estas que ya jugué', listas con cuotas y montos. Es DISTINTO de "
-            "place_bet: place_bet registra UN pick previamente sugerido por el "
-            "bot (numerado #1..N); register_external_bets registra apuestas "
-            "externas que el usuario hizo por su cuenta, pueden ser muchas a la vez."
+            "está reportando para que el bot las trackee. Esta herramienta GANA "
+            "sobre analyze_match cuando hay señales claras de paste de boleta. "
+            "Usá esta herramienta cuando el mensaje incluya cualquiera de: "
+            "(a) verbo de registro en pasado/imperativo: 'aposté', 'jugué', "
+            "'guarda', 'registra', 'anota', 'tomá nota', 'metele', "
+            "'guarda en mis apuestas'; (b) un monto con separador o símbolo: "
+            "'$60,000', '60.000', '60000 COP', '60k'; (c) una cuota decimal: "
+            "'1.85', '4.10'; (d) estructura de boleta Wplay: 'Tiros de Esquina', "
+            "'Total Goles', 'Resultado Tiempo Completo', 'Más de (X)', "
+            "'Menos de (X)', 'Ganancia: $...', 'Monto de Apuesta'. "
+            "BASTAN DOS de estas señales — aunque el mensaje también nombre dos "
+            "equipos, NO uses analyze_match. Es DISTINTO de place_bet: place_bet "
+            "registra UN pick previamente sugerido por el bot (numerado #1..N); "
+            "register_external_bets registra apuestas externas que el usuario "
+            "hizo por su cuenta, pueden ser muchas a la vez."
         ),
         "input_schema": {
             "type": "object",
@@ -318,14 +328,35 @@ Contexto del bot (lo que SÍ existe):
 - Modo: paper trading.
 - El usuario es colombiano. Usa español de Colombia con TUTEO ESTRICTO en tus respuestas: "tú", "puedes", "necesitas", "quieres", "dime", "registra". NUNCA uses voseo argentino: nada de "vos", "podés", "necesitás", "querés", "decime", "registrá", "hacé". Esto aplica a smalltalk y a cualquier texto que devuelvas. Ejemplo correcto: "¿Qué necesitas? Puedes pedirme picks." Ejemplo INCORRECTO: "¿Qué necesitás? Podés pedirme picks."
 
-Reglas (en orden de prioridad — la regla #1 GANA sobre todas las demás):
+Reglas (en orden de prioridad — la regla #1 GANA sobre las siguientes):
 
-1. **DOS EQUIPOS ESPECÍFICOS = analyze_match, SIEMPRE.** Si el mensaje
+1. **PASTE DE BOLETA / "GUARDA ESTA APUESTA" = register_external_bets.**
+   Si el mensaje contiene señales claras de una apuesta YA hecha que el
+   usuario quiere TRACKEAR, elegí register_external_bets aunque mencione
+   dos equipos. Señales fuertes (basta con DOS de éstas para disparar):
+   - Verbos en pasado o imperativo de registro: "aposté", "jugué",
+     "guarda esta apuesta", "registra", "tomá nota", "guarda en mis
+     apuestas", "anota", "metele", "metí".
+   - Monto con símbolo o separador de miles: "$60,000", "60.000",
+     "60000 COP", "stake 60k".
+   - Línea de cuota decimal pegada: "1.85", "4.10", "@ 1.85".
+   - Estructura de boleta Wplay: "Tiros de Esquina", "Total Goles",
+     "Resultado Tiempo Completo", "Ganancia: $...", "Más de (X)",
+     "Menos de (X)" seguido de cuota.
+   - Listas con varios partidos + cuotas + montos.
+   Esta regla GANA sobre la #2. El usuario está reportando una apuesta
+   ejecutada, no pidiendo análisis. Ejemplos:
+   - "guarda esta apuesta de everton vs city, menos de 14 corners 1.85,
+     aposté 60000" → register_external_bets
+   - "aposté 50000 al chelsea forest empate 4.10" → register_external_bets
+   - paste con "Monto de Apuesta $50,000" → register_external_bets
+
+2. **DOS EQUIPOS ESPECÍFICOS = analyze_match.** Si el mensaje
    menciona dos equipos específicos en estructura "X vs Y", "X v Y", "X y Y",
    "X contra Y", o cualquier construcción que claramente refiera a UN
    partido entre dos clubes nombrados, elegí analyze_match aunque el
    mensaje también incluya las palabras "picks", "apuestas", "tips",
-   "info", "dame", etc.
+   "info", "dame", etc. — SIEMPRE QUE NO disparó la regla #1.
    - "dame picks de medellin vs aguilas" → analyze_match (NO get_picks)
    - "info del bayern psg" → analyze_match
    - "qué dice el modelo de chelsea forest" → analyze_match
@@ -333,13 +364,13 @@ Reglas (en orden de prioridad — la regla #1 GANA sobre todas las demás):
    El usuario quiere foco en ESE partido. get_picks tirar lista completa
    de la liga es respuesta INCORRECTA.
 
-2. Si el usuario nombra una liga sin nombrar dos equipos específicos,
+3. Si el usuario nombra una liga sin nombrar dos equipos específicos,
    mapeala al enum exacto. Si dice algo que no existe ("La Liga",
    "Bundesliga"), igual elegí get_picks con leagues vacío y avisá en reasoning.
-3. Si pide "el top pick" / "el mejor" / "uno solo" → top_only=true.
-4. "finde" en Colombia = sábado y domingo (time_window="weekend").
-5. Si el mensaje no mapea a ninguna acción ejecutable, usá smalltalk con una respuesta corta.
-6. NUNCA mezcles dos acciones. Una sola tool por turno."""
+4. Si pide "el top pick" / "el mejor" / "uno solo" → top_only=true.
+5. "finde" en Colombia = sábado y domingo (time_window="weekend").
+6. Si el mensaje no mapea a ninguna acción ejecutable, usá smalltalk con una respuesta corta.
+7. NUNCA mezcles dos acciones. Una sola tool por turno."""
 
 
 class IntentParser:
