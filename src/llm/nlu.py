@@ -370,7 +370,12 @@ Reglas (en orden de prioridad — la regla #1 GANA sobre las siguientes):
 4. Si pide "el top pick" / "el mejor" / "uno solo" → top_only=true.
 5. "finde" en Colombia = sábado y domingo (time_window="weekend").
 6. Si el mensaje no mapea a ninguna acción ejecutable, usá smalltalk con una respuesta corta.
-7. NUNCA mezcles dos acciones. Una sola tool por turno."""
+7. NUNCA mezcles dos acciones. Una sola tool por turno.
+8. **REFERENCIAS AL ÚLTIMO PARTIDO ANALIZADO.** Si después del system prompt hay un bloque "Contexto del chat: ..." con un partido, y el usuario hace una pregunta que claramente es seguimiento de ESE partido sin nombrar equipos nuevos, usá analyze_match con esos equipos. Disparadores típicos:
+   - "y las cuotas?", "y wplay?", "porqué no aparece?", "verifica de nuevo"
+   - "cómo va ese partido?", "dame más info", "y los corners?"
+   - cualquier pregunta sobre "el partido" / "ese partido" / "eso" sin nombrar otros equipos
+   Si el usuario nombra DOS equipos nuevos, ignorá el contexto y usá los equipos nuevos."""
 
 
 class IntentParser:
@@ -380,20 +385,30 @@ class IntentParser:
         self.client = AsyncAnthropic(api_key=anthropic_api_key)
         self.model = model
 
-    async def parse(self, text: str) -> Intent:
-        """Parse free text → Intent. Falls back to action='help' on failure."""
+    async def parse(self, text: str, context_hint: str = "") -> Intent:
+        """Parse free text → Intent. Falls back to action='help' on failure.
+
+        context_hint: short string injected as an extra system message describing
+        recent chat state (e.g. "Último partido analizado: Bayern Munich vs PSG").
+        Used so follow-ups like "y las cuotas?" or "porqué no aparece?" route to
+        analyze_match for the same teams instead of falling into smalltalk.
+        """
         text = text.strip()
         if not text:
             return Intent(action="help", reasoning="(mensaje vacío)")
+
+        system_blocks: list[dict[str, Any]] = [
+            {"type": "text", "text": SYSTEM_PROMPT,
+             "cache_control": {"type": "ephemeral"}},
+        ]
+        if context_hint:
+            system_blocks.append({"type": "text", "text": context_hint})
 
         try:
             msg = await self.client.messages.create(
                 model=self.model,
                 max_tokens=400,
-                system=[
-                    {"type": "text", "text": SYSTEM_PROMPT,
-                     "cache_control": {"type": "ephemeral"}},
-                ],
+                system=system_blocks,
                 tools=_TOOLS,
                 tool_choice={"type": "any"},  # force a tool selection
                 messages=[{"role": "user", "content": text}],

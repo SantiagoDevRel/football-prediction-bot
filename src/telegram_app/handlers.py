@@ -1123,6 +1123,15 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     league = target["league"]
     status = target["status"]
 
+    # Stash so follow-up natural-language messages without team names
+    # ("y wplay?", "porqué no hay cuotas?", "cómo va ese partido?")
+    # can still resolve to this match. NLU layer reads this hint.
+    if hasattr(context, "user_data") and context.user_data is not None:
+        context.user_data["_last_match"] = {
+            "home": home, "away": away, "match_id": match_id,
+            "league": league, "kickoff_utc": target["kickoff_utc"],
+        }
+
     # Run ensemble
     league_slug = _league_slug_from_name(league)
     models = _load_models(league_slug)
@@ -1742,7 +1751,21 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception:
         pass
 
-    intent = await parser.parse(text)
+    # Build context hint from chat memory so follow-ups without team names
+    # ("y las cuotas?", "porqué no aparece?") still resolve to the right match.
+    context_hint = ""
+    if hasattr(context, "user_data") and context.user_data is not None:
+        last = context.user_data.get("_last_match")
+        if last:
+            context_hint = (
+                f"Contexto del chat: el último partido analizado en este chat fue "
+                f"{last['home']} vs {last['away']} ({last.get('league','')}). "
+                f"Si el usuario hace una pregunta de seguimiento sin nombrar equipos "
+                f"(ej: 'y las cuotas?', 'porqué no aparece?', 'verifica', 'y wplay?'), "
+                f"usá analyze_match con home_team='{last['home']}' y away_team='{last['away']}'."
+            )
+
+    intent = await parser.parse(text, context_hint=context_hint)
     logger.info(f"NLU: '{text[:80]}' -> {intent.action} leagues={intent.leagues} time={intent.time_window} top={intent.top_only}")
 
     # Dispatch

@@ -52,15 +52,39 @@ class WplayOdds:
 
 # ---------- Normalization helpers ----------
 
+_NAME_ALIASES: dict[str, str] = {
+    # Long form -> canonical short, so DB names and Wplay short names collapse
+    # to the same string. Substring match in cmd_analizar requires equality
+    # (or one inside the other) after this normalization.
+    "paris saint germain": "psg",
+    "paris saint-germain": "psg",
+    "manchester united": "man utd",
+    "man united": "man utd",
+    "manchester city": "man city",
+    "tottenham hotspur": "tottenham",
+    "wolverhampton wanderers": "wolves",
+    "borussia dortmund": "dortmund",
+    "borussia monchengladbach": "monchengladbach",
+    "bayer leverkusen": "leverkusen",
+    "internazionale": "inter",
+    "atletico madrid": "atletico madrid",
+    "real betis balompie": "real betis",
+}
+
+
 def normalize_name(name: str) -> str:
-    """Lowercase, strip accents, collapse whitespace, drop generic FC/CD/SC suffixes."""
+    """Lowercase, strip accents, flatten dashes/apostrophes, collapse whitespace,
+    drop generic FC/CD/SC suffixes, then map known long forms to a canonical
+    short. The alias step is what lets DB 'Paris Saint-Germain' match Wplay 'PSG'."""
     s = unicodedata.normalize("NFKD", name)
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = s.lower().strip()
+    for ch in ("-", "'", "’", ".", ",", "/"):
+        s = s.replace(ch, " ")
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"\b(fc|cd|sc|cf|cdf|de|football|club)\b", "", s)
     s = re.sub(r"\s+", " ", s).strip()
-    return s
+    return _NAME_ALIASES.get(s, s)
 
 
 _SLUG_TEAMS_RE = re.compile(r"^/es/e/(\d+)/(.+)$")
