@@ -23,6 +23,7 @@ from src.telegram_app.handlers import (  # noqa: E402
     cmd_analizar,
     cmd_aposte,
     cmd_balance,
+    cmd_chat,
     cmd_envivo,
     cmd_help,
     cmd_historial,
@@ -52,6 +53,7 @@ def main() -> None:
     app.add_handler(CommandHandler("historial", cmd_historial))
     app.add_handler(CommandHandler("analizar", cmd_analizar))
     app.add_handler(CommandHandler("envivo", cmd_envivo))
+    app.add_handler(CommandHandler("chat", cmd_chat))
     app.add_handler(CallbackQueryHandler(callback_handler))
     # Free-text fallback: any non-command text goes through Claude NLU.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_natural_language))

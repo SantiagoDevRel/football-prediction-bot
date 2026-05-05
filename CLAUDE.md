@@ -49,6 +49,15 @@ Bot que detecta value bets en fútbol combinando modelos estadísticos (Dixon-Co
 - Esos flags son features del modelo numérico, no la predicción final.
 - **Nunca pedirle a Claude "dame la probabilidad de que gane X"** — está mal calibrado para eso.
 
+### 8. Agente conversacional (Claude Sonnet 4.6 con tool-use)
+- En `src/agent/` — capa SOBRE el sistema determinista, no reemplaza nada.
+- Maneja: boletas pegadas (parlays Wplay), preguntas razonadas tipo "te parece bien?", multi-turno con memoria.
+- Tools: `get_balance`, `get_history`, `get_open_positions`, `query_match`, `log_custom_bet`, `log_parlay`, `resolve_bet`, `set_bankroll`, `get_today_picks`.
+- Persistencia: tabla `chat_history` (sliding window de 12 turnos, prompt caching para system+tools).
+- Routing: `cmd_natural_language` usa heurístico (`_looks_conversational`) — boletas/multi-línea/preguntas abiertas → agente; one-liners → NLU rápido (Haiku).
+- Hard rule: el agente NUNCA guarda apuestas sin confirmación explícita del usuario.
+- Picks del usuario van con `source='user_manual'` o `'user_parlay'` (vs `'model'` del pipeline determinista).
+
 ---
 
 ## Reglas de código

@@ -133,6 +133,9 @@ CREATE TABLE IF NOT EXISTS picks (
     confidence        REAL,
     stake             REAL NOT NULL,
     mode              TEXT NOT NULL,            -- "paper" or "real"
+    source            TEXT DEFAULT 'model',     -- "model" | "user_manual" | "user_parlay"
+    parlay_group_id   INTEGER,                  -- groups multi-leg user bets
+    note              TEXT,                     -- free-text note (parlay desc, custom market label)
     placed_at         TEXT DEFAULT CURRENT_TIMESTAMP,
 
     -- Resolution (filled after match)
@@ -144,6 +147,24 @@ CREATE TABLE IF NOT EXISTS picks (
 );
 CREATE INDEX IF NOT EXISTS idx_picks_mode ON picks(mode);
 CREATE INDEX IF NOT EXISTS idx_picks_resolved ON picks(won);
+CREATE INDEX IF NOT EXISTS idx_picks_source ON picks(source);
+CREATE INDEX IF NOT EXISTS idx_picks_parlay ON picks(parlay_group_id);
+
+-- Conversational chat memory for the Telegram bot's Claude agent.
+-- One row per turn (user OR assistant). Sliding window in code: last N turns
+-- go to Claude verbatim, older turns are summarized in a single "summary" row.
+CREATE TABLE IF NOT EXISTS chat_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id      TEXT NOT NULL,
+    role         TEXT NOT NULL,           -- "user" | "assistant" | "summary"
+    content      TEXT NOT NULL,           -- raw text (assistant text response, or user message)
+    tool_calls   TEXT,                    -- JSON list of tool invocations made on this turn (assistant only)
+    tokens_in    INTEGER,                 -- input tokens used (assistant only)
+    tokens_out   INTEGER,                 -- output tokens used
+    model        TEXT,                    -- model id used
+    created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_chat_chat_time ON chat_history(chat_id, created_at);
 
 -- Bankroll history (one row per change: stake, payout, deposit, withdrawal)
 CREATE TABLE IF NOT EXISTS bankroll_history (

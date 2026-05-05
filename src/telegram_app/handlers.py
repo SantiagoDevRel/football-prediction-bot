@@ -1467,6 +1467,59 @@ def _get_nlu_parser():
         return None
 
 
+# Conversational agent (Sonnet 4.6 with tools). Lazy-init singleton.
+_CONV_AGENT = None
+
+
+def _get_conv_agent():
+    global _CONV_AGENT
+    if _CONV_AGENT is not None:
+        return _CONV_AGENT
+    if not settings.anthropic_api_key:
+        return None
+    try:
+        from src.agent import ConversationalAgent
+        _CONV_AGENT = ConversationalAgent(settings.anthropic_api_key)
+        return _CONV_AGENT
+    except Exception as exc:
+        logger.warning(f"conversational agent init failed: {exc}")
+        return None
+
+
+def _looks_conversational(text: str) -> bool:
+    """Decide whether to route a message to the conversational agent or the
+    fast NLU dispatcher.
+
+    Sends to conv agent when:
+      - message has multiple lines (likely a pasted bet slip / multiline ask)
+      - long message (> 100 chars) — likely a question with reasoning
+      - contains $/COP amounts together with bet-slip vocabulary
+      - contains 'parlay' / 'combinada' / 'doble' as a betting term
+      - asks open-ended ("te parece", "qué opinas", "qué piensas", "buena idea")
+    """
+    t = text.strip()
+    if not t:
+        return False
+    if t.count("\n") >= 2:
+        return True
+    if len(t) > 120:
+        return True
+    low = t.lower()
+    open_phrases = (
+        "te parece", "qué opinas", "que opinas", "qué piensas", "que piensas",
+        "buena idea", "vale la pena", "le tengo fe", "qué decís", "que decis",
+        "razona", "razoná", "razoname", "explica", "explicame", "explícame",
+        "qué crees", "que crees", "ayuda con", "ayúdame con", "ayudame con",
+        "está bien", "esta bien apostar",
+    )
+    if any(p in low for p in open_phrases):
+        return True
+    parlay_terms = ("parlay", "combinada", "boleta", "doble oportunidad", "ganancia posible", "cuotas:")
+    if any(p in low for p in parlay_terms):
+        return True
+    return False
+
+
 async def _handle_register_externals(
     update: Update, context: ContextTypes.DEFAULT_TYPE,
     *, raw_text: str, mode_hint: str,
@@ -1733,15 +1786,119 @@ async def _handle_open_positions(
     await update.message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
 
 
+async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Force-route a message to the conversational agent (bypasses NLU heuristic).
+
+    Usage:
+      /chat <mensaje libre>
+      /chat reset   → wipe chat history for this chat
+    """
+    if not update.message:
+        return
+    raw = " ".join(context.args or []).strip()
+    chat_id = str(update.effective_chat.id)
+
+    if raw.lower() in ("reset", "limpiar", "borrar", "clear"):
+        agent = _get_conv_agent()
+        if agent is None:
+            await update.message.reply_text("<i>Falta ANTHROPIC_API_KEY.</i>", parse_mode=ParseMode.HTML)
+            return
+        n = agent.reset_history(chat_id)
+        await update.message.reply_text(
+            f"<i>Memoria borrada: {n} turnos eliminados.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not raw:
+        await update.message.reply_text(
+            "<i>Uso: <code>/chat &lt;mensaje&gt;</code> o <code>/chat reset</code> para limpiar memoria.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    agent = _get_conv_agent()
+    if agent is None:
+        await update.message.reply_text("<i>Falta ANTHROPIC_API_KEY en .env.</i>", parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception:
+        pass
+
+    try:
+        reply = await agent.chat(chat_id, raw)
+    except Exception as exc:
+        logger.exception("conversational agent failed")
+        await update.message.reply_text(
+            f"<i>Algo se rompió: {exc}</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    txt = reply.text or "(sin respuesta)"
+    for i in range(0, len(txt), 3800):
+        await update.message.reply_text(txt[i : i + 3800], parse_mode=ParseMode.HTML)
+
+
 async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catch-all for plain-text messages (no '/'). Uses Claude to parse intent
-    and dispatches to the appropriate command handler.
+    """Catch-all for plain-text messages (no '/').
+
+    Routes to ONE of two engines:
+      - Conversational agent (Claude Sonnet 4.6 with tools, persistent memory)
+        for boletas pegadas, multi-line asks, or open-ended questions.
+      - Fast NLU (Claude Haiku, single tool-pick) for one-liner intents like
+        "dame picks", "balance", "analizá X vs Y" — dispatches to slash cmds.
     """
     if not update.message or not update.message.text:
         return
     text = update.message.text.strip()
     if not text:
         return
+
+    # /reset_chat — escape hatch to wipe conversation memory
+    if text.lower() in ("/reset_chat", "reset_chat", "reset chat", "borra el chat", "reinicia el chat"):
+        agent = _get_conv_agent()
+        if agent is not None:
+            n = agent.reset_history(str(update.effective_chat.id))
+            await update.message.reply_text(
+                f"<i>Memoria de chat borrada ({n} turnos eliminados).</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+    # Show a tiny "thinking" hint so the user knows we received it
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception:
+        pass
+
+    # Route conversational-style messages to the agent
+    if _looks_conversational(text):
+        agent = _get_conv_agent()
+        if agent is not None:
+            try:
+                reply = await agent.chat(str(update.effective_chat.id), text)
+            except Exception as exc:
+                logger.exception("conversational agent failed")
+                await update.message.reply_text(
+                    f"<i>Algo se rompió en el agente: {exc}. Probá un mensaje más corto o un comando slash.</i>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            logger.info(
+                f"[agent] reply tools={reply.tools_called} in={reply.tokens_in} out={reply.tokens_out}"
+            )
+            # Telegram caps single messages around 4096 chars; chunk conservatively.
+            txt = reply.text or "(sin respuesta)"
+            for i in range(0, len(txt), 3800):
+                await update.message.reply_text(
+                    txt[i : i + 3800],
+                    parse_mode=ParseMode.HTML,
+                )
+            return
+        # If agent unavailable but message looks conversational, fall through to NLU.
 
     parser = _get_nlu_parser()
     if parser is None:
@@ -1752,12 +1909,6 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode=ParseMode.HTML,
         )
         return
-
-    # Show a tiny "thinking" hint so the user knows we received it
-    try:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    except Exception:
-        pass
 
     # Build context hint from chat memory so follow-ups without team names
     # ("y las cuotas?", "porqué no aparece?") still resolve to the right match.
