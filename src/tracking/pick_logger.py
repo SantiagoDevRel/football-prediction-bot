@@ -52,7 +52,7 @@ def get_current_bankroll(mode: PaperOrReal) -> float:
     return 0.0
 
 
-def log_pick(pick: ValueBet, mode: PaperOrReal = "paper", *, bypass_risk_check: bool = False) -> int:
+def log_pick(pick: ValueBet, mode: PaperOrReal = "real", *, bypass_risk_check: bool = False) -> int:
     """Insert a pick row + corresponding bankroll history row (stake out). Returns pick id.
 
     Risk-management gates are enforced unless bypass_risk_check=True (used by

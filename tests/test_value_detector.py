@@ -19,7 +19,7 @@ def test_detects_value_above_min_edge():
     odds = [OddsLine("1x2", "home", 2.0)]  # casa pays 2.0 -> edge = 1.20*1 = +20%
     bets = detect_value(
         match_id=1, home_team="A", away_team="B", league="X",
-        prediction=pred, odds_lines=odds, bankroll=1000,
+        prediction=pred, odds_lines=odds, bankroll=2_000_000,
         min_edge=0.05, max_edge=0.30,
     )
     assert len(bets) == 1
@@ -32,7 +32,7 @@ def test_filters_below_min_edge():
     odds = [OddsLine("1x2", "home", 1.85)]  # edge ~1.7%, below 5%
     bets = detect_value(
         match_id=1, home_team="A", away_team="B", league="X",
-        prediction=pred, odds_lines=odds, bankroll=1000,
+        prediction=pred, odds_lines=odds, bankroll=2_000_000,
     )
     assert bets == []
 
@@ -43,7 +43,7 @@ def test_filters_above_max_edge():
     odds = [OddsLine("1x2", "home", 5.0)]  # edge ~250% -> filtered
     bets = detect_value(
         match_id=1, home_team="A", away_team="B", league="X",
-        prediction=pred, odds_lines=odds, bankroll=1000,
+        prediction=pred, odds_lines=odds, bankroll=2_000_000,
         max_edge=0.30,
     )
     assert bets == []
@@ -65,7 +65,7 @@ def test_sorts_by_edge_descending():
     ]
     bets = detect_value(
         match_id=1, home_team="A", away_team="B", league="X",
-        prediction=pred, odds_lines=odds, bankroll=1000,
+        prediction=pred, odds_lines=odds, bankroll=2_000_000,
     )
     # Both should pass (between 5% and 30%); draw should be first because higher edge
     assert len(bets) == 2

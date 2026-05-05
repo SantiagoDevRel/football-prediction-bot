@@ -352,14 +352,13 @@ def _format_telegram_message(
     predictions: list,
     picks: list,
     bankroll: float,
-    bankroll_mode: str,
     wplay_odds: list,
 ) -> str:
     """Compose the Telegram message: split picks into safe (low odds) vs risky (high odds)."""
     today_str = datetime.now().strftime("%a %d %b").lower()
     header_lines = [
         f"<b>🎯 Picks del día</b> · {today_str}",
-        f"<i>Bankroll {bankroll_mode}: ${bankroll:,.0f} COP</i>",
+        f"<i>Bankroll: ${bankroll:,.0f} COP</i>",
     ]
 
     if not predictions:
@@ -597,11 +596,14 @@ async def run_pipeline_core(
 
 
 async def main() -> None:
-    """Cron entry point: runs core pipeline, auto-logs picks, sends Telegram summary."""
+    """Cron entry point: runs core pipeline and sends Telegram summary.
+
+    Real-only: never auto-logs picks. The user confirms each pick via /aposte
+    so real bankroll stays under their control.
+    """
     logger.info("=== Daily pipeline starting ===")
 
     # Step 0: auto-resolve any picks whose match has finished since last run.
-    # Free side-effect — ensures bankroll is up-to-date before logging new picks.
     try:
         resolved = await auto_resolve_paper_picks()
         if resolved:
@@ -609,50 +611,17 @@ async def main() -> None:
     except Exception as exc:
         logger.warning(f"auto-resolver failed: {exc}")
 
-    # Detect active bankroll mode (mirrors handlers.py /picks logic).
-    # If user has declared a real saldo or has open real picks, size on REAL bankroll.
-    real_bk = get_current_bankroll("real")
-    with get_conn() as conn:
-        n_real_open = conn.execute(
-            "SELECT COUNT(*) FROM picks WHERE mode='real' AND won IS NULL"
-        ).fetchone()[0]
-    active_mode = "real" if (real_bk > 0 or n_real_open > 0) else "paper"
-    logger.info(f"Mode detected: {active_mode} (real_bk={real_bk:,.0f}, open_real={n_real_open})")
-
     result = await run_pipeline_core(
-        persist_predictions_flag=True, bankroll_mode=active_mode,
+        persist_predictions_flag=True, bankroll_mode="real",
     )
     logger.info(
         f"fixtures={result['n_fixtures']} predictions={len(result['predictions'])} "
         f"wplay_odds={result['wplay_odds_count']} value_candidates={len(result['value_bets'])}"
     )
 
-    # Auto-log only in paper mode. In real mode we never shadow-log — the user
-    # must confirm each pick via /aposte so real bankroll stays in their control.
-    picks_made: list[dict] = []
-    rejected: list[str] = []
-    if active_mode == "paper":
-        for vb_dict in result["value_bets"]:
-            from src.betting.value_detector import ValueBet
-            # Strip enrichment fields that aren't ValueBet constructor args
-            excluded = {"kickoff", "claude_verdict", "claude_reasoning", "claude_confidence"}
-            vb_kwargs = {k: v for k, v in vb_dict.items() if k not in excluded}
-            vb = ValueBet(**vb_kwargs)
-            try:
-                pick_id = log_pick(vb, mode="paper")
-                picks_made.append({"pick_id": pick_id, **vb_dict})
-            except ValueError as exc:
-                rejected.append(f"{vb.home_team} v {vb.away_team} {vb.market}:{vb.selection} ({exc})")
-        logger.info(f"value bets logged: {len(picks_made)} (rejected by risk: {len(rejected)})")
-        for r in rejected:
-            logger.info(f"  rejected: {r}")
-    else:
-        # Real mode: don't auto-log; just surface the candidates to the user.
-        picks_made = list(result["value_bets"])
-
-    # 7. Compose Telegram summary
+    # Surface candidates to the user (no auto-log — real money is theirs to confirm).
     msg = _format_telegram_message(
-        result["predictions"], picks_made, result["bankroll"], active_mode,
+        result["predictions"], result["value_bets"], result["bankroll"],
         [None] * result["wplay_odds_count"],
     )
     await send_message(msg)

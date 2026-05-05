@@ -150,7 +150,7 @@ def _resolved_paper_picks_with_positive_clv() -> int:
 
 # ---------- Public API ----------
 
-def check_pick_allowed(stake: float, mode: str = "paper") -> RiskCheckResult:
+def check_pick_allowed(stake: float, mode: str = "real") -> RiskCheckResult:
     """Layered checks. Return first failing reason; allow if all pass."""
     if stake <= 0:
         return RiskCheckResult(False, "stake debe ser positivo")
@@ -196,20 +196,11 @@ def check_pick_allowed(stake: float, mode: str = "paper") -> RiskCheckResult:
                     f"antes de la próxima apuesta."
                 )
 
-    # Real-money gate
-    if mode == "real":
-        n_paper = _resolved_paper_picks_with_positive_clv()
-        if n_paper < REAL_MONEY_MIN_PAPER_PICKS:
-            return RiskCheckResult(
-                False,
-                f"Modo REAL bloqueado: necesitás {REAL_MONEY_MIN_PAPER_PICKS}+ picks paper "
-                f"con CLV positivo (tenés {n_paper}). Seguí en paper."
-            )
-
+    # (Paper-CLV gate removed — paper mode no longer exists.)
     return RiskCheckResult(True, "")
 
 
-def risk_summary(mode: str = "paper") -> dict:
+def risk_summary(mode: str = "real") -> dict:
     """Snapshot of risk metrics for /balance or dashboard."""
     bankroll = _current_bankroll(mode)
     peak = _peak_bankroll(mode)

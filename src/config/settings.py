@@ -28,11 +28,12 @@ class Settings(BaseSettings):
     # Free tier: 100 requests/day. Sign up at https://dashboard.api-football.com/
     api_football_key: str = ""
 
-    # Operation mode
-    betting_mode: Literal["paper", "real"] = "paper"
+    # Operation mode (paper mode removed — real-only)
+    betting_mode: Literal["paper", "real"] = "real"
 
     # Bankroll & risk
-    paper_bankroll_initial: float = 100_000.0
+    # Legacy: paper_bankroll_initial only seeds an empty real bankroll on first run.
+    paper_bankroll_initial: float = 0.0
     kelly_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
     min_edge: float = Field(default=0.05, ge=0.0, le=1.0)
     # Edges above this are almost always model errors, not real market value.
