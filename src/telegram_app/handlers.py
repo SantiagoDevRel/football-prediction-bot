@@ -208,8 +208,14 @@ def _humanize_action(market: str, selection: str, home: str, away: str) -> str:
         return f"{home} gana por 2+ goles" if selection == "home" else f"{away} no pierde por 2+"
     if market.startswith("corners_"):
         line = market.removeprefix("corners_")
+        if selection == "exact":
+            return f"Exactamente {line} córners"
         side = "Más de" if selection == "over" else "Menos de"
         return f"{side} {line} córners"
+    if market.startswith("cards_"):
+        line = market.removeprefix("cards_")
+        side = "Más de" if selection == "over" else "Menos de"
+        return f"{side} {line} tarjetas"
     return f"{market}:{selection}"
 
 
@@ -1363,14 +1369,22 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 f"<i>(modelo {prob:.0%} · edge {sign}{e*100:.0f}%)</i>"
             )
 
-    # Markets we don't (yet) scrape automatically. Tell the user so they don't
-    # think corners/cards just had no value — it's that they weren't fetched.
-    parts.append("")
-    parts.append(
-        "<i>⚙️ Córners y tarjetas no están en este análisis — Wplay los esconde "
-        "tras un click extra que el scraper aún no automatiza. Si los querés, "
-        "miralos directo en Wplay.</i>"
+    # Córners y tarjetas — los scrapeamos pero el ensemble actual no modela
+    # estas líneas, así que mostramos las cuotas crudas sin cálculo de edge.
+    # El usuario decide. (Si más adelante metemos un modelo poisson de
+    # córners, esta sección pasa a tener edge calculado como las demás.)
+    side_market_keys = sorted(
+        [k for k in casa_odds.keys() if k[0].startswith(("corners_", "cards_"))],
+        key=lambda k: (k[0].split("_")[0], float(k[0].split("_")[1]), k[1]),
     )
+    if side_market_keys:
+        parts.append("")
+        parts.append("<b>Córners y tarjetas (Wplay, sin edge calculado):</b>")
+        for key in side_market_keys[:14]:
+            market, sel = key
+            odds_val = casa_odds[key]
+            action = _humanize_action(market, sel, home, away)
+            parts.append(f"  · {action} @ {odds_val:.2f}")
 
     # Claude reasoning (uses ALL context: user msg, form, H2H, market consensus)
     if settings.anthropic_api_key:

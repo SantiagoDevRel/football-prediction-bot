@@ -330,18 +330,165 @@ async def scrape_league(
     return []
 
 
+# Match Wplay's "Tiros de Esquina - 3 Opciones (N)" section name → integer line.
+_CORNERS_SECTION_RE = re.compile(r"Tiros de Esquina\s*-\s*3 Opciones\s*\((\d+)\)", re.I)
+# Match "Total de Tarjetas (4.5)" → float line.
+_CARDS_SECTION_RE = re.compile(r"Total de Tarjetas\s*\((\d+(?:\.\d+)?)\)", re.I)
+# "Más de N(.X)" / "Menos de N(.X)" / "Exacto N" — pure label, no suffix.
+_MAS_RE = re.compile(r"^M[áa]s de\s+(\d+(?:\.\d+)?)\s*$", re.I)
+_MENOS_RE = re.compile(r"^Menos de\s+(\d+(?:\.\d+)?)\s*$", re.I)
+_EXACTO_RE = re.compile(r"^Exacto\s+(\d+(?:\.\d+)?)\s*$", re.I)
+
+
+async def _extract_market_sections(page) -> list[dict]:
+    """Walk every `span.mkt-name` and return its tightest `expander mkt` ancestor
+    along with the (title, decimal-text) pairs of every `button.price` inside.
+
+    Section-scoped extraction is required because the same button title (e.g.
+    'Más de 4.5') appears under both 'Total Goles' and 'Total de Tarjetas';
+    a global title query would conflate the two markets."""
+    return await page.evaluate(
+        """() => {
+            const out = [];
+            document.querySelectorAll('span.mkt-name').forEach(n => {
+                const name = (n.innerText || '').trim();
+                if (!name) return;
+                let p = n.parentElement; let depth = 0;
+                while (p && depth < 10) {
+                    const cls = (p.className || '').toString();
+                    if (cls.includes('expander') && cls.includes('mkt')) {
+                        const items = [];
+                        p.querySelectorAll(':scope button.price[title]').forEach(b => {
+                            const t = b.getAttribute('title');
+                            const dec = b.querySelector('span.price.dec');
+                            const v = dec ? (dec.innerText || '').trim() : null;
+                            if (t && v) items.push([t, v]);
+                        });
+                        if (items.length > 0) out.push({name, items});
+                        return;
+                    }
+                    p = p.parentElement; depth++;
+                }
+            });
+            return out;
+        }"""
+    )
+
+
+def _parse_sections(
+    sections: list[dict], league_slug: str, home_team: str, away_team: str,
+    event_id: str, captured_at: datetime,
+    *, include_cards: bool = False,
+) -> list[WplayOdds]:
+    """Map scraped DOM sections into WplayOdds rows. include_cards=True is used
+    on the second pass after the 'Tarjetas' tab click."""
+    out: list[WplayOdds] = []
+    home_t = home_team.strip()
+    away_t = away_team.strip()
+
+    def _push(market: str, sel: str, val_text: str) -> None:
+        v = _safe_dec(val_text)
+        if v is None:
+            return
+        out.append(WplayOdds(
+            league_slug=league_slug, home_team=home_team, away_team=away_team,
+            event_id=event_id, market=market, selection=sel, odds=v,
+            captured_at=captured_at,
+        ))
+
+    for sec in sections:
+        name = sec["name"]
+        items = sec["items"]
+
+        # 1X2 — section name "Resultado Tiempo Completo"
+        if name == "Resultado Tiempo Completo":
+            for title, val in items:
+                t = title.strip()
+                if t == home_t:
+                    _push("1x2", "home", val)
+                elif t == "Empate":
+                    _push("1x2", "draw", val)
+                elif t == away_t:
+                    _push("1x2", "away", val)
+            continue
+
+        # BTTS — "Ambos Equipos Anotan"
+        if name == "Ambos Equipos Anotan":
+            for title, val in items:
+                t = title.strip()
+                if t == "Si":
+                    _push("btts", "yes", val)
+                elif t == "No":
+                    _push("btts", "no", val)
+            continue
+
+        # Goals O/U — full-match section "Total Goles Más/Menos de".
+        # Buttons inside come at half-integer lines we care about (1.5, 2.5, 3.5)
+        # plus higher lines (4.5, 5.5, 6.5) that we don't model but still keep.
+        if name == "Total Goles Más/Menos de":
+            for title, val in items:
+                t = title.strip()
+                m = _MAS_RE.match(t)
+                if m:
+                    line = float(m.group(1))
+                    if line in (1.5, 2.5, 3.5, 4.5, 5.5, 6.5):
+                        _push(f"ou_{line}", "over", val)
+                    continue
+                m = _MENOS_RE.match(t)
+                if m:
+                    line = float(m.group(1))
+                    if line in (1.5, 2.5, 3.5, 4.5, 5.5, 6.5):
+                        _push(f"ou_{line}", "under", val)
+            continue
+
+        # Corners 3-way — "Tiros de Esquina - 3 Opciones (N)" with buttons
+        # 'Más de N', 'Exacto N', 'Menos de N'. N is integer (8, 9, 10, 11, 12).
+        m = _CORNERS_SECTION_RE.search(name)
+        if m:
+            line = int(m.group(1))
+            for title, val in items:
+                t = title.strip()
+                if t == f"Más de {line}":
+                    _push(f"corners_{line}", "over", val)
+                elif t == f"Menos de {line}":
+                    _push(f"corners_{line}", "under", val)
+                elif t == f"Exacto {line}":
+                    _push(f"corners_{line}", "exact", val)
+            continue
+
+        # Cards — only parsed on second pass after Tarjetas tab click
+        if include_cards:
+            m = _CARDS_SECTION_RE.search(name)
+            if m:
+                line = float(m.group(1))
+                for title, val in items:
+                    t = title.strip()
+                    if _MAS_RE.match(t) and float(_MAS_RE.match(t).group(1)) == line:
+                        _push(f"cards_{line}", "over", val)
+                    elif _MENOS_RE.match(t) and float(_MENOS_RE.match(t).group(1)) == line:
+                        _push(f"cards_{line}", "under", val)
+                continue
+
+    return out
+
+
 async def scrape_match_markets(
     event_id: str, league_slug: str, home_team: str, away_team: str,
     timeout_ms: int = 25_000,
 ) -> list[WplayOdds]:
-    """Visit /es/e/{event_id}/... and extract all markets visible inline.
+    """Visit /es/e/{event_id}/... and extract all markets we can read.
 
-    Markets pulled today (must be present in initial HTML, no expand-on-click):
-      - 1X2 (Resultado Tiempo Completo)
-      - BTTS (Ambos Equipos Anotan)
-      - O/U 1.5, 2.5, 3.5 (from "Total Goles Más/Menos de" group market)
+    Two-pass extraction:
+      Pass 1 (default 'Todos' view): 1X2, BTTS, Goals O/U (1.5/2.5/3.5/+),
+        Corners 3-way at lines 8–12 (Wplay names them 'Tiros de Esquina -
+        3 Opciones (N)' with Más de/Exacto/Menos de buttons).
+      Pass 2 (after clicking 'Tarjetas (N)' tab): Cards Total at line 4.5
+        from the 'Total de Tarjetas (4.5)' section. Wplay lazy-loads the
+        cards section — without the tab click those buttons don't render.
 
-    Lazy-loaded markets (hándicap asiático, marcador correcto) are skipped.
+    All matching is section-scoped (DOM ancestor `expander mkt`) because
+    'Más de 4.5' as a global selector matches both Total Goles and Total
+    de Tarjetas, conflating two different markets.
     """
     url = f"https://apuestas.wplay.co/es/e/{event_id}/"
     browser, page = await _open_page()
@@ -353,7 +500,6 @@ async def scrape_match_markets(
         except Exception as exc:
             logger.warning(f"match nav {event_id} failed: {exc}")
             return out
-        # Let JS render markets
         try:
             await page.wait_for_selector("button.price[title]", timeout=15_000)
         except Exception:
@@ -361,127 +507,43 @@ async def scrape_match_markets(
             return out
         await page.wait_for_timeout(2_000)
 
-        # 1X2: prices in mkt with name "Resultado Tiempo Completo"
+        # Pass 1 — default view
         try:
-            buttons_1x2 = await page.query_selector_all(
-                f"button.price[title='{home_team} ']"
-            )
-            home_btn = buttons_1x2[0] if buttons_1x2 else None
-            buttons_draw = await page.query_selector_all(
-                "button.price[title='Empate ']"
-            )
-            draw_btn = buttons_draw[0] if buttons_draw else None
-            buttons_away = await page.query_selector_all(
-                f"button.price[title='{away_team} ']"
-            )
-            away_btn = buttons_away[0] if buttons_away else None
-
-            for sel, btn in (("home", home_btn), ("draw", draw_btn), ("away", away_btn)):
-                if btn is None:
-                    continue
-                dec = await btn.query_selector("span.price.dec")
-                if dec is None:
-                    continue
-                val = _safe_dec(await dec.inner_text())
-                if val is None:
-                    continue
-                out.append(WplayOdds(
-                    league_slug=league_slug, home_team=home_team, away_team=away_team,
-                    event_id=event_id, market="1x2", selection=sel, odds=val,
-                    captured_at=captured_at,
-                ))
+            sections = await _extract_market_sections(page)
+            out.extend(_parse_sections(
+                sections, league_slug, home_team, away_team, event_id, captured_at,
+                include_cards=False,
+            ))
         except Exception as exc:
-            logger.warning(f"[match {event_id}] 1X2 parse error: {exc}")
+            logger.warning(f"[match {event_id}] pass-1 parse error: {exc}")
 
-        # BTTS: title="Si " and title="No "
+        # Pass 2 — click the Tarjetas tab and re-extract just the cards section.
+        # Best effort: if click fails or no cards section appears, log and move on.
         try:
-            for sel, title in (("yes", "Si "), ("no", "No ")):
-                btn = await page.query_selector(f"button.price[title='{title}']")
-                if btn is None:
-                    continue
-                dec = await btn.query_selector("span.price.dec")
-                if dec is None:
-                    continue
-                val = _safe_dec(await dec.inner_text())
-                if val is None:
-                    continue
-                out.append(WplayOdds(
-                    league_slug=league_slug, home_team=home_team, away_team=away_team,
-                    event_id=event_id, market="btts", selection=sel, odds=val,
-                    captured_at=captured_at,
+            clicked = await page.evaluate(
+                """() => {
+                    const links = document.querySelectorAll('a, [role=tab]');
+                    for (const l of links) {
+                        const t = (l.innerText || '').trim();
+                        if (/^Tarjetas\\s*\\(\\d+\\)$/i.test(t)) {
+                            l.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }"""
+            )
+            if clicked:
+                await page.wait_for_timeout(2_500)
+                card_sections = await _extract_market_sections(page)
+                out.extend(_parse_sections(
+                    card_sections, league_slug, home_team, away_team,
+                    event_id, captured_at, include_cards=True,
                 ))
+            else:
+                logger.info(f"[match {event_id}] no Tarjetas tab found — skipping cards")
         except Exception as exc:
-            logger.warning(f"[match {event_id}] BTTS parse error: {exc}")
-
-        # O/U total goals: "Más de 1.5", "Menos de 1.5", etc.
-        for line in (1.5, 2.5, 3.5):
-            for sel, label in (("over", f"Más de {line}"), ("under", f"Menos de {line}")):
-                btn = await page.query_selector(f"button.price[title='{label}']")
-                if btn is None:
-                    continue
-                dec = await btn.query_selector("span.price.dec")
-                if dec is None:
-                    continue
-                val = _safe_dec(await dec.inner_text())
-                if val is None:
-                    continue
-                out.append(WplayOdds(
-                    league_slug=league_slug, home_team=home_team, away_team=away_team,
-                    event_id=event_id, market=f"ou_{line}", selection=sel, odds=val,
-                    captured_at=captured_at,
-                ))
-
-        # Corners markets: "Tiros de Esquina - 3 Opciones (9)" with selections
-        # like "Más de 8" / "8 o 9" / "Menos de 10" — but we capture only the
-        # 3-way over/under at integer lines. Wplay also has direct OU lines
-        # at half integers via inline buttons titled "Más de 9.5", etc.
-        for line in (8.5, 9.5, 10.5, 11.5, 12.5):
-            for sel, label in (
-                ("over", f"Más de {line} Tiros de esquina"),
-                ("under", f"Menos de {line} Tiros de esquina"),
-                # Fallback short form sometimes used
-                ("over_alt", f"Más de {line}"),
-                ("under_alt", f"Menos de {line}"),
-            ):
-                if sel.endswith("_alt"):
-                    # Skip the short form — already handled by the goals OU loop above
-                    continue
-                btn = await page.query_selector(f"button.price[title='{label}']")
-                if btn is None:
-                    continue
-                dec = await btn.query_selector("span.price.dec")
-                if dec is None:
-                    continue
-                val = _safe_dec(await dec.inner_text())
-                if val is None:
-                    continue
-                out.append(WplayOdds(
-                    league_slug=league_slug, home_team=home_team, away_team=away_team,
-                    event_id=event_id, market=f"corners_{line}", selection=sel, odds=val,
-                    captured_at=captured_at,
-                ))
-
-        # Cards: "Más de 4.5 Tarjetas" / "Menos de 4.5 Tarjetas" — usually lazy-loaded
-        # but worth trying inline (some matches expose them).
-        for line in (3.5, 4.5, 5.5, 6.5):
-            for sel, label in (
-                ("over", f"Más de {line} Tarjetas"),
-                ("under", f"Menos de {line} Tarjetas"),
-            ):
-                btn = await page.query_selector(f"button.price[title='{label}']")
-                if btn is None:
-                    continue
-                dec = await btn.query_selector("span.price.dec")
-                if dec is None:
-                    continue
-                val = _safe_dec(await dec.inner_text())
-                if val is None:
-                    continue
-                out.append(WplayOdds(
-                    league_slug=league_slug, home_team=home_team, away_team=away_team,
-                    event_id=event_id, market=f"cards_{line}", selection=sel, odds=val,
-                    captured_at=captured_at,
-                ))
+            logger.warning(f"[match {event_id}] pass-2 (cards) failed: {exc}")
 
         logger.info(f"[match {event_id}] extracted {len(out)} odds across markets")
         return out
