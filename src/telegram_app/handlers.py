@@ -1341,6 +1341,37 @@ async def cmd_analizar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"A {casa_odds.get(('1x2','away'), '—')}"
         )
 
+    # Show every other market we did scrape, even when no edge — user wants to
+    # see the full board, not only what passed the filter. Skip 1X2 (already
+    # printed above) and skip rows that made the TOP picks block above.
+    top_keys = {(m, s) for (m, s, *_rest) in (good[:3] if good else [])}
+    other_rows: list[tuple[str, str, float, float, float]] = []
+    for (market, sel, prob, odds_val, e) in ranked:
+        if market == "1x2":
+            continue
+        if (market, sel) in top_keys:
+            continue
+        other_rows.append((market, sel, prob, odds_val, e))
+    if other_rows:
+        parts.append("")
+        parts.append("<b>Otros mercados Wplay (sin edge suficiente):</b>")
+        for market, sel, prob, odds_val, e in other_rows[:8]:
+            action = _humanize_action(market, sel, home, away)
+            sign = "+" if e >= 0 else ""
+            parts.append(
+                f"  · {action} @ {odds_val:.2f}  "
+                f"<i>(modelo {prob:.0%} · edge {sign}{e*100:.0f}%)</i>"
+            )
+
+    # Markets we don't (yet) scrape automatically. Tell the user so they don't
+    # think corners/cards just had no value — it's that they weren't fetched.
+    parts.append("")
+    parts.append(
+        "<i>⚙️ Córners y tarjetas no están en este análisis — Wplay los esconde "
+        "tras un click extra que el scraper aún no automatiza. Si los querés, "
+        "miralos directo en Wplay.</i>"
+    )
+
     # Claude reasoning (uses ALL context: user msg, form, H2H, market consensus)
     if settings.anthropic_api_key:
         try:
