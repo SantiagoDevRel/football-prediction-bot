@@ -1486,6 +1486,92 @@ def _get_conv_agent():
         return None
 
 
+def _record_chat_turn(chat_id: str, role: str, content: str) -> None:
+    """Persist a turn into chat_history. Used to keep the conversational
+    agent's memory in sync even when slash commands handle the reply.
+    Best-effort: failures are logged but don't block the response.
+    """
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO chat_history (chat_id, role, content) VALUES (?, ?, ?)",
+                (chat_id, role, content),
+            )
+    except Exception as exc:
+        logger.warning(f"_record_chat_turn failed: {exc}")
+
+
+def _has_recent_history(chat_id: str, minutes: int = 15) -> bool:
+    """Return True if there's a chat turn for this chat_id in the last N minutes.
+    Used to keep follow-up messages on the conversational track even when
+    they're short (would otherwise route to fast NLU and lose context).
+    """
+    try:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT created_at FROM chat_history WHERE chat_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+        if not row:
+            return False
+        last = datetime.fromisoformat(row["created_at"])
+        return (datetime.now() - last) < timedelta(minutes=minutes)
+    except Exception:
+        return False
+
+
+def _summarize_analyze_for_history(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Build a one-paragraph summary of what /analizar just showed, so the
+    agent can reference it in follow-ups. Reads context.user_data['_last_match']
+    + the latest predictions/odds for that match_id."""
+    if not (hasattr(context, "user_data") and context.user_data):
+        return "[bot mostró análisis de un partido]"
+    last = context.user_data.get("_last_match")
+    if not last:
+        return "[bot mostró análisis de un partido]"
+    mid = last.get("match_id")
+    home, away, league = last.get("home"), last.get("away"), last.get("league")
+    parts = [f"[Bot mostró análisis: {home} vs {away} ({league}), match_id={mid}]"]
+    if mid:
+        try:
+            with get_conn() as conn:
+                preds = conn.execute(
+                    "SELECT market, selection, probability FROM predictions "
+                    "WHERE match_id = ? AND model = 'ensemble' "
+                    "ORDER BY market, selection",
+                    (mid,),
+                ).fetchall()
+                odds = conn.execute(
+                    """SELECT market, selection, odds, bookmaker
+                         FROM odds_snapshots
+                        WHERE match_id = ?
+                          AND captured_at = (
+                              SELECT MAX(captured_at) FROM odds_snapshots o2
+                               WHERE o2.match_id = odds_snapshots.match_id
+                                 AND o2.market = odds_snapshots.market
+                                 AND o2.selection = odds_snapshots.selection
+                                 AND o2.bookmaker = odds_snapshots.bookmaker
+                          )""",
+                    (mid,),
+                ).fetchall()
+            if preds:
+                pstr = ", ".join(
+                    f"{p['market']}:{p['selection']}={float(p['probability']):.0%}"
+                    for p in preds[:10]
+                )
+                parts.append(f"Modelo: {pstr}.")
+            if odds:
+                ostr = ", ".join(
+                    f"{o['market']}:{o['selection']}={o['odds']}({o['bookmaker']})"
+                    for o in odds[:10]
+                )
+                parts.append(f"Cuotas: {ostr}.")
+        except Exception as exc:
+            logger.debug(f"_summarize_analyze_for_history: {exc}")
+    return " ".join(parts)
+
+
 def _looks_conversational(text: str) -> bool:
     """Decide whether to route a message to the conversational agent or the
     fast NLU dispatcher.
@@ -1868,18 +1954,25 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
+    chat_id = str(update.effective_chat.id)
+
     # Show a tiny "thinking" hint so the user knows we received it
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     except Exception:
         pass
 
-    # Route conversational-style messages to the agent
-    if _looks_conversational(text):
+    # Route to conversational agent if either:
+    #   (a) the message looks conversational (parlay paste, "te parece?", multi-line)
+    #   (b) there's already an active conversation for this chat (recent history)
+    # Once we're in dialogue, every follow-up should keep going through the agent
+    # so it has full memory — even short follow-ups like "y si subo el stake?".
+    use_agent = _looks_conversational(text) or _has_recent_history(chat_id)
+    if use_agent:
         agent = _get_conv_agent()
         if agent is not None:
             try:
-                reply = await agent.chat(str(update.effective_chat.id), text)
+                reply = await agent.chat(chat_id, text)
             except Exception as exc:
                 logger.exception("conversational agent failed")
                 await update.message.reply_text(
@@ -1927,6 +2020,30 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
     intent = await parser.parse(text, context_hint=context_hint)
     logger.info(f"NLU: '{text[:80]}' -> {intent.action} leagues={intent.leagues} time={intent.time_window} top={intent.top_only}")
 
+    # NEW: route smalltalk to the conversational agent — Haiku NLU's smalltalk
+    # path produces stand-alone replies that don't get logged into chat_history,
+    # which is what caused the bot to forget which match the user just analyzed.
+    # Sending smalltalk through the agent keeps memory continuous.
+    if intent.action == "smalltalk":
+        agent = _get_conv_agent()
+        if agent is not None:
+            try:
+                reply = await agent.chat(chat_id, text)
+                txt = reply.text or "🙂"
+                for i in range(0, len(txt), 3800):
+                    await update.message.reply_text(txt[i : i + 3800], parse_mode=ParseMode.HTML)
+                return
+            except Exception:
+                logger.exception("agent fallback for smalltalk failed; using NLU reasoning")
+        await update.message.reply_text(intent.reasoning or "🙂", parse_mode=ParseMode.HTML)
+        return
+
+    # Persist the user's message to chat_history BEFORE dispatching, so the
+    # agent has memory of it on follow-up turns. The synth assistant entry is
+    # written after dispatch (per branch below) with a description of what
+    # the slash command surfaced.
+    _record_chat_turn(chat_id, "user", text)
+
     # Dispatch
     if intent.action == "picks":
         await _run_and_send_picks(
@@ -1935,28 +2052,39 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
             time_window=intent.time_window,
             top_only=intent.top_only,
         )
+        scope = ", ".join(intent.leagues) if intent.leagues else "todas las ligas"
+        _record_chat_turn(
+            chat_id, "assistant",
+            f"[Bot mostró lista de picks del modelo (top edge): scope={scope} ventana={intent.time_window}. "
+            f"Usá la herramienta get_today_picks o get_open_positions para ver los detalles si el usuario hace follow-up.]"
+        )
         return
 
     if intent.action == "live":
         if hasattr(context, "user_data") and context.user_data is not None:
             context.user_data["_last_user_message"] = text
         await cmd_envivo(update, context)
+        _record_chat_turn(chat_id, "assistant", "[Bot mostró apuestas en vivo (cuotas Wplay live + recomendación).]")
         return
 
     if intent.action == "balance":
         await cmd_balance(update, context)
+        _record_chat_turn(chat_id, "assistant", "[Bot mostró balance y posiciones abiertas. Usá get_balance/get_open_positions si necesitás los números otra vez.]")
         return
 
     if intent.action == "history":
         await cmd_historial(update, context)
+        _record_chat_turn(chat_id, "assistant", "[Bot mostró historial reciente (apuestas resueltas + P&L).]")
         return
 
     if intent.action == "resolve_auto":
         await cmd_resolver_auto(update, context)
+        _record_chat_turn(chat_id, "assistant", "[Bot intentó resolver automáticamente apuestas con resultado conocido.]")
         return
 
     if intent.action == "register_externals":
         await _handle_register_externals(update, context, raw_text=text, mode_hint=intent.mode_hint)
+        _record_chat_turn(chat_id, "assistant", "[Bot procesó un bloque pegado de apuestas externas.]")
         return
 
     if intent.action == "set_bankroll":
@@ -1965,18 +2093,22 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
             amount=intent.bankroll_amount or 0,
             mode=intent.mode_hint or "real",
         )
+        _record_chat_turn(chat_id, "assistant", f"[Bot ajustó bankroll a {intent.bankroll_amount}.]")
         return
 
     if intent.action == "open_positions":
         await _handle_open_positions(update, context)
+        _record_chat_turn(chat_id, "assistant", "[Bot listó las posiciones abiertas.]")
         return
 
     if intent.action == "delete_pick":
         await _handle_delete_pick(update, context, pick_id=intent.pick_number)
+        _record_chat_turn(chat_id, "assistant", f"[Bot eliminó pick #{intent.pick_number}.]")
         return
 
     if intent.action == "help":
         await cmd_help(update, context)
+        _record_chat_turn(chat_id, "assistant", "[Bot mostró ayuda.]")
         return
 
     if intent.action == "analyze":
@@ -1999,6 +2131,7 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
             await cmd_analizar(update, context)
         finally:
             context.args = original_args
+        _record_chat_turn(chat_id, "assistant", _summarize_analyze_for_history(context))
         return
 
     if intent.action == "place_bet":
@@ -2017,12 +2150,9 @@ async def cmd_natural_language(update: Update, context: ContextTypes.DEFAULT_TYP
             await cmd_aposte(update, context)
         finally:
             context.args = original_args
-        return
-
-    if intent.action == "smalltalk":
-        reply = intent.reasoning or "🙂"
-        await update.message.reply_text(reply, parse_mode=ParseMode.HTML)
+        _record_chat_turn(chat_id, "assistant", f"[Bot procesó /aposte pick #{intent.pick_number} stake={intent.stake}.]")
         return
 
     # Fallback
     await cmd_help(update, context)
+    _record_chat_turn(chat_id, "assistant", "[Bot mostró ayuda (intent no identificado).]")
