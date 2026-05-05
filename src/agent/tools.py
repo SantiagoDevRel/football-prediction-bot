@@ -574,6 +574,136 @@ def tool_get_today_picks(_args: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+# ---------- Tool: get_live_match (async, fetches ESPN + Wplay live) ----------
+
+# League name → slug used by ESPN/Wplay modules
+_LEAGUE_SLUG_BY_NAME = {
+    "Premier League": "premier_league",
+    "Liga BetPlay Dimayor": "liga_betplay",
+    "UEFA Champions League": "champions_league",
+    "Copa Libertadores": "libertadores",
+    "Copa Sudamericana": "sudamericana",
+}
+
+
+async def tool_get_live_match(args: dict[str, Any]) -> str:
+    """Live state of a match — ESPN score + minute, Wplay live odds across ALL
+    visible markets (raw section dump so the agent can read 'Doble Oportunidad',
+    'Se clasificará', 'Total Goles Más/Menos de', etc. directly).
+
+    Slow (8-15s, opens a Playwright browser). Use only when the user asks about
+    a live game or wants current odds for a market query_match doesn't surface.
+    """
+    home = (args.get("home_team") or "").strip()
+    away = (args.get("away_team") or "").strip()
+    if not home or not away:
+        return "error: provide home_team and away_team"
+
+    h_low, a_low = home.lower(), away.lower()
+
+    # Find match in DB (-2/+2 day window)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT m.id, m.kickoff_utc, m.status,
+                   ht.name AS home, at_.name AS away, l.name AS league
+              FROM matches m
+              JOIN teams ht ON ht.id = m.home_team_id
+              JOIN teams at_ ON at_.id = m.away_team_id
+              JOIN leagues l  ON l.id = m.league_id
+             WHERE m.kickoff_utc >= datetime('now', '-2 days')
+               AND m.kickoff_utc <= datetime('now', '+2 days')
+            """
+        ).fetchall()
+    target = None
+    for r in rows:
+        if (h_low in r["home"].lower() or r["home"].lower() in h_low) \
+                and (a_low in r["away"].lower() or r["away"].lower() in a_low):
+            target = dict(r)
+            break
+    if target is None:
+        return f"no match found in window for '{home}' vs '{away}'"
+
+    league_slug = _LEAGUE_SLUG_BY_NAME.get(target["league"], "")
+    out = [f"match={target['home']} vs {target['away']} ({target['league']}) match_id={target['id']}"]
+
+    # --- ESPN live score ---
+    if league_slug:
+        try:
+            from src.data.espn import fetch_scoreboard
+            espn_rows = await fetch_scoreboard(league_slug)
+            for em in espn_rows:
+                if (h_low in em.home_team.lower() or em.home_team.lower() in h_low) \
+                        and (a_low in em.away_team.lower() or em.away_team.lower() in a_low):
+                    if em.status == "live":
+                        out.append(
+                            f"LIVE_NOW: {em.home_team} {em.home_goals or 0}-{em.away_goals or 0} "
+                            f"{em.away_team} | min={em.minute or '?'}"
+                        )
+                    else:
+                        out.append(
+                            f"status={em.status} kickoff={em.kickoff_utc.isoformat()} "
+                            f"score={em.home_goals}-{em.away_goals}"
+                        )
+                    break
+            else:
+                out.append("espn: match not in scoreboard (probably not today)")
+        except Exception as exc:
+            out.append(f"espn_fetch_failed: {exc}")
+    else:
+        out.append(f"unknown_league_slug for '{target['league']}'")
+
+    # --- Wplay live odds (raw dump of every market section) ---
+    try:
+        from src.data.wplay_scraper import (
+            scrape_inplay, normalize_name as _wnorm,
+            _open_page, _extract_market_sections,
+        )
+        inplay = await scrape_inplay()
+        wplay_event_id: str | None = None
+        wh, wa = target["home"], target["away"]
+        hn, an = _wnorm(wh), _wnorm(wa)
+        for r in inplay:
+            rh, ra = _wnorm(r.home_team), _wnorm(r.away_team)
+            if (hn in rh or rh in hn) and (an in ra or ra in an):
+                wplay_event_id = r.event_id
+                wh, wa = r.home_team, r.away_team
+                break
+        if not wplay_event_id:
+            out.append("wplay_live: no event found (may not be live, or not on Wplay)")
+        else:
+            url = f"https://apuestas.wplay.co/es/e/{wplay_event_id}/"
+            browser, page = await _open_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
+                try:
+                    await page.wait_for_selector("button.price[title]", timeout=15_000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1_500)
+                sections = await _extract_market_sections(page)
+            finally:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if not sections:
+                out.append("wplay_live: page rendered but no markets parsed")
+            else:
+                out.append(f"wplay_live: {len(sections)} markets visible on /es/e/{wplay_event_id}")
+                for sec in sections[:30]:
+                    name = sec["name"]
+                    items = sec["items"][:10]
+                    item_strs = [f"'{t}'={v}" for t, v in items]
+                    out.append(f"  [{name}] " + " | ".join(item_strs))
+                if len(sections) > 30:
+                    out.append(f"  …({len(sections) - 30} more sections truncated)")
+    except Exception as exc:
+        out.append(f"wplay_scrape_failed: {exc}")
+
+    return "\n".join(out)
+
+
 # ---------- Registry ----------
 
 TOOL_HANDLERS = {
@@ -586,6 +716,7 @@ TOOL_HANDLERS = {
     "resolve_bet": tool_resolve_bet,
     "set_bankroll": tool_set_bankroll,
     "get_today_picks": tool_get_today_picks,
+    "get_live_match": tool_get_live_match,  # async
 }
 
 
@@ -695,5 +826,26 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "get_today_picks",
         "description": "Devuelve los picks que el modelo determinista detectó hoy con value (edge >5%). Para 'qué picks hay', 'top picks de hoy'.",
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_live_match",
+        "description": (
+            "FETCH EN VIVO de un partido: marcador actual + minuto (ESPN) y "
+            "TODAS las cuotas live de Wplay (incluyendo Doble Oportunidad, "
+            "Se clasificará/Clasificación, Total Goles Más/Menos, BTTS, etc.). "
+            "Usalo cuando: (a) el usuario pregunte por un partido EN VIVO, "
+            "(b) quiera cuotas actuales que query_match (que solo lee la DB) no "
+            "tenga frescas, (c) pregunte por mercados específicos como 'doble "
+            "oportunidad' o 'se clasifica'. Lento (~10s) — no lo llames cuando "
+            "ya tenés la info reciente en chat_history."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "home_team": {"type": "string"},
+                "away_team": {"type": "string"},
+            },
+            "required": ["home_team", "away_team"],
+        },
     },
 ]

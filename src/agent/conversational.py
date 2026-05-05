@@ -15,6 +15,8 @@ Cost control:
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -43,12 +45,15 @@ Cuando el usuario pide algo, casi siempre necesitás llamar herramientas:
 - get_balance — bankroll actual + posiciones abiertas
 - get_history — apuestas resueltas y P&L (default 7 días)
 - get_open_positions — apuestas abiertas con detalle
-- query_match — buscá un partido por nombres de equipos (DEVUELVE match_id, probs del modelo y cuotas Wplay)
+- query_match — buscá un partido por nombres (DB-only: match_id, probs del modelo, cuotas guardadas). RÁPIDO pero la info puede estar desactualizada para partidos en vivo.
+- get_live_match — FETCH EN VIVO: marcador actual + minuto (ESPN) y todas las cuotas live de Wplay (incluyendo Doble Oportunidad, Se clasificará, Total Goles, BTTS, etc.). Lento (~10s). Usalo SIEMPRE que el usuario pregunte por algo en vivo, mercados específicos no estándar (doble oportunidad, qualify, handicap), o cuotas que query_match no tenga frescas.
 - log_custom_bet — guardá UNA apuesta simple del usuario (resta stake del bankroll)
 - log_parlay — guardá una combinada (stake se cobra una vez, paga solo si TODAS ganan)
 - resolve_bet — marcá apuesta ganada/perdida
 - set_bankroll — ajuste manual del bankroll
 - get_today_picks — picks del modelo determinista de hoy
+
+REGLA: si el usuario te pasa una boleta con mercados como "Doble Oportunidad", "Se clasificará", "Hándicap", o pregunta por un partido EN VIVO, NO te quedes en query_match — llamá get_live_match. Tu trabajo es traer la info, no decirle al usuario que vos no la tenés.
 
 # Reglas duras
 1. **NUNCA guardes una apuesta sin confirmación explícita del usuario.** Si pega una boleta, primero parsea las legs, mostrá un resumen claro, preguntá "¿la guardo?" — solo si dice sí (o "dale", "guárdala", "sí registrala") llamás log_custom_bet/log_parlay.
@@ -122,12 +127,15 @@ class ConversationalAgent:
 
     # ---------- Tool execution ----------
 
-    def _exec_tool(self, name: str, args: dict[str, Any]) -> str:
+    async def _exec_tool(self, name: str, args: dict[str, Any]) -> str:
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
             return f"error: unknown tool '{name}'"
         try:
-            result = handler(args)
+            if inspect.iscoroutinefunction(handler):
+                result = await handler(args)
+            else:
+                result = handler(args)
         except Exception as exc:
             logger.exception(f"tool {name} crashed")
             return f"error: tool {name} crashed: {exc}"
@@ -200,7 +208,7 @@ class ConversationalAgent:
                 tools_called.append(name)
                 tool_call_log.append({"name": name, "input": args})
                 logger.info(f"[agent {chat_id}] tool: {name} args={args}")
-                result = self._exec_tool(name, args)
+                result = await self._exec_tool(name, args)
                 tool_result_blocks.append({
                     "type": "tool_result",
                     "tool_use_id": tu.id,
