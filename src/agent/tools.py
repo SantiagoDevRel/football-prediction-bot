@@ -10,6 +10,7 @@ the model can recover or apologize to the user.
 from __future__ import annotations
 
 import json
+import unicodedata
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -18,6 +19,15 @@ from loguru import logger
 from src.config import settings
 from src.data.persist import get_conn
 from src.tracking.pick_logger import get_current_bankroll
+
+
+def _norm(s: str) -> str:
+    """Lowercase + strip diacritics. Critical because SQLite's LOWER() does
+    NOT remove accents — 'Atlético' vs 'Atletico' won't match without this."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in s if not unicodedata.combining(c)).lower().strip()
 
 
 # ---------- Helpers ----------
@@ -167,8 +177,10 @@ def tool_get_open_positions(_args: dict[str, Any]) -> str:
 
 def tool_query_match(args: dict[str, Any]) -> str:
     """Find a match by team names. Returns match_id + model probs + Wplay odds if any."""
-    home = (args.get("home_team") or "").strip().lower()
-    away = (args.get("away_team") or "").strip().lower()
+    home_raw = (args.get("home_team") or "").strip()
+    away_raw = (args.get("away_team") or "").strip()
+    home = _norm(home_raw)
+    away = _norm(away_raw)
     if not home and not away:
         return "error: provide at least home_team or away_team"
 
@@ -190,16 +202,16 @@ def tool_query_match(args: dict[str, Any]) -> str:
 
     candidates = []
     for r in rows:
-        h = r["home"].lower()
-        a = r["away"].lower()
+        h = _norm(r["home"])
+        a = _norm(r["away"])
         if (not home or home in h or h in home) and (not away or away in a or a in away):
             candidates.append(dict(r))
 
     if not candidates:
         # fallback: just match either team
         for r in rows:
-            h = r["home"].lower()
-            a = r["away"].lower()
+            h = _norm(r["home"])
+            a = _norm(r["away"])
             if (home and (home in h or home in a)) or (away and (away in h or away in a)):
                 candidates.append(dict(r))
 
@@ -599,9 +611,11 @@ async def tool_get_live_match(args: dict[str, Any]) -> str:
     if not home or not away:
         return "error: provide home_team and away_team"
 
-    h_low, a_low = home.lower(), away.lower()
+    hn, an = _norm(home), _norm(away)
 
-    # Find match in DB (-2/+2 day window)
+    # Find match in DB (-2/+2 day window). All matching is accent-stripped
+    # because the DB stores names with accents ("Atlético Madrid") and users
+    # often type without ("atletico madrid").
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -617,8 +631,8 @@ async def tool_get_live_match(args: dict[str, Any]) -> str:
         ).fetchall()
     target = None
     for r in rows:
-        if (h_low in r["home"].lower() or r["home"].lower() in h_low) \
-                and (a_low in r["away"].lower() or r["away"].lower() in a_low):
+        rh, ra = _norm(r["home"]), _norm(r["away"])
+        if (hn in rh or rh in hn) and (an in ra or ra in an):
             target = dict(r)
             break
     if target is None:
@@ -633,8 +647,8 @@ async def tool_get_live_match(args: dict[str, Any]) -> str:
             from src.data.espn import fetch_scoreboard
             espn_rows = await fetch_scoreboard(league_slug)
             for em in espn_rows:
-                if (h_low in em.home_team.lower() or em.home_team.lower() in h_low) \
-                        and (a_low in em.away_team.lower() or em.away_team.lower() in a_low):
+                emh, ema = _norm(em.home_team), _norm(em.away_team)
+                if (hn in emh or emh in hn) and (an in ema or ema in an):
                     if em.status == "live":
                         out.append(
                             f"LIVE_NOW: {em.home_team} {em.home_goals or 0}-{em.away_goals or 0} "
