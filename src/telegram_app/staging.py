@@ -34,6 +34,19 @@ class StagedPick:
     recommended_stake: float
     reasoning: str
     kickoff_utc: str | None
+    claude_verdict: str | None = None
+    claude_reasoning: str | None = None
+
+
+def _ensure_claude_columns() -> None:
+    """Idempotent migration: add claude_verdict / claude_reasoning to staged_picks
+    on existing DBs that pre-date the Claude review render."""
+    with get_conn() as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(staged_picks)")}
+        if "claude_verdict" not in cols:
+            conn.execute("ALTER TABLE staged_picks ADD COLUMN claude_verdict TEXT")
+        if "claude_reasoning" not in cols:
+            conn.execute("ALTER TABLE staged_picks ADD COLUMN claude_reasoning TEXT")
 
 
 def clear_chat(chat_id: str) -> None:
@@ -43,6 +56,7 @@ def clear_chat(chat_id: str) -> None:
 
 def stage_picks(chat_id: str, value_bets: list[dict]) -> list[StagedPick]:
     """Insert N picks numbered 1..N. Returns the StagedPicks for display."""
+    _ensure_claude_columns()
     clear_chat(chat_id)
     out: list[StagedPick] = []
     with get_conn() as conn:
@@ -52,8 +66,9 @@ def stage_picks(chat_id: str, value_bets: list[dict]) -> list[StagedPick]:
                 INSERT INTO staged_picks
                     (chat_id, session_number, match_id, home_team, away_team, league,
                      market, selection, odds, bookmaker, model_probability, fair_odds,
-                     edge, confidence, recommended_stake, reasoning, kickoff_utc)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     edge, confidence, recommended_stake, reasoning, kickoff_utc,
+                     claude_verdict, claude_reasoning)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id, i, vb["match_id"], vb["home_team"], vb["away_team"],
@@ -61,6 +76,7 @@ def stage_picks(chat_id: str, value_bets: list[dict]) -> list[StagedPick]:
                     vb["bookmaker"], vb["model_probability"], vb["fair_odds"],
                     vb["edge"], vb.get("confidence"), vb["recommended_stake"],
                     vb.get("reasoning", ""), vb.get("kickoff", ""),
+                    vb.get("claude_verdict"), vb.get("claude_reasoning"),
                 ),
             )
             out.append(StagedPick(
@@ -75,12 +91,15 @@ def stage_picks(chat_id: str, value_bets: list[dict]) -> list[StagedPick]:
                 recommended_stake=vb["recommended_stake"],
                 reasoning=vb.get("reasoning", ""),
                 kickoff_utc=vb.get("kickoff"),
+                claude_verdict=vb.get("claude_verdict"),
+                claude_reasoning=vb.get("claude_reasoning"),
             ))
     logger.info(f"staged {len(out)} picks for chat {chat_id}")
     return out
 
 
 def get_staged(chat_id: str, session_number: int) -> StagedPick | None:
+    _ensure_claude_columns()
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM staged_picks WHERE chat_id = ? AND session_number = ?",
@@ -88,6 +107,7 @@ def get_staged(chat_id: str, session_number: int) -> StagedPick | None:
         ).fetchone()
     if row is None:
         return None
+    keys = row.keys() if hasattr(row, "keys") else []
     return StagedPick(
         chat_id=row["chat_id"], session_number=row["session_number"],
         match_id=row["match_id"], home_team=row["home_team"],
@@ -98,4 +118,6 @@ def get_staged(chat_id: str, session_number: int) -> StagedPick | None:
         fair_odds=row["fair_odds"], edge=row["edge"],
         confidence=row["confidence"], recommended_stake=row["recommended_stake"],
         reasoning=row["reasoning"] or "", kickoff_utc=row["kickoff_utc"],
+        claude_verdict=row["claude_verdict"] if "claude_verdict" in keys else None,
+        claude_reasoning=row["claude_reasoning"] if "claude_reasoning" in keys else None,
     )

@@ -195,6 +195,8 @@ CREATE TABLE IF NOT EXISTS staged_picks (
     recommended_stake REAL,
     reasoning         TEXT,
     kickoff_utc       TEXT,
+    claude_verdict    TEXT,
+    claude_reasoning  TEXT,
     created_at        TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_staged_chat ON staged_picks(chat_id, session_number);

@@ -385,14 +385,24 @@ async def _run_and_send_picks(
         action = _humanize_action(s.market, s.selection, s.home_team, s.away_team)
         casa_implied = 1.0 / s.odds
         when = _humanize_kickoff(s.kickoff_utc)
-        return [
+        block = [
             f"<b>#{s.session_number}</b> · {s.home_team} vs {s.away_team}",
             f"<i>{league_short} · {when}</i>",
             f"➤ <b>{action}</b>",
             f"💰 Cuota: <b>{s.odds:.2f}</b>  ·  Stake sugerido: <b>${s.recommended_stake:,.0f}</b>",
             f"<i>🧠 Modelo: {s.model_probability:.0%} · Wplay: {casa_implied:.0%} · Edge: +{s.edge*100:.0f}%</i>",
-            "",
         ]
+        if s.claude_verdict:
+            icon = {"take": "✅", "reduce": "⚠️", "skip": "🛑"}.get(s.claude_verdict, "❓")
+            verdict_es = {"take": "ok", "reduce": "stake reducido", "skip": "skip"}.get(
+                s.claude_verdict, s.claude_verdict
+            )
+            if s.claude_reasoning:
+                block.append(f"<i>{icon} Claude ({verdict_es}): {s.claude_reasoning}</i>")
+            else:
+                block.append(f"<i>{icon} Claude: {verdict_es}</i>")
+        block.append("")
+        return block
 
     if safe:
         parts.append("━━━━━━━━━━━━━━━━━━━")
