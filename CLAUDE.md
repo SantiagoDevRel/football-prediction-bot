@@ -151,10 +151,10 @@ repo. Es una app Next.js separada:
 - Doc completa de la app: su `README.md` y `lib/arkiv.ts`.
 
 ### Modelo de datos (entities Arkiv)
-- `entityType: "bet"` → payload `{match, market, selection, odds, stake, ticket, bookmaker, status, placedAt, resolvedAt}`. `status ∈ {open, won, lost}`.
+- `entityType: "bet"` → payload `{match, market, selection, odds, stake, ticket, bookmaker, status, placedAt, resolvedAt}`. `status ∈ {open, won, lost, void}`.
 - `entityType: "bankroll"` → `{amount (+recarga / −retiro), note, at}`.
 - Atributo de proyecto fijo: `project = santi-bets-stz-4q7m`. Las lecturas filtran por `project` **Y** `createdBy(wallet propia)`.
-- **Solo hay won/lost, NO hay push/refund.** Un Draw-No-Bet que termina en empate (refund) no tiene estado propio.
+- **`void` = anulada/reembolso (push)** — agregado 2026-06-12. Estado neutro (amarillo, ni gana ni pierde): el stake vuelve entero, net $0, no afecta P/L y no cuenta en récord W/L (sí en `voided`). Cubre Draw-No-Bet que termina en empate, mercados anulados, etc. Cuota 1.00 = marcador de reembolso (el API acepta `odds >= 1`). Resolver con `POST /api/bets/resolve {result:"void"}` o el botón "Anulada".
 
 ### Cómo actualizar (la forma que funcionó — 2026-06-11)
 Pegar al **API de prod** (escribe on-chain con la wallet de Vercel; así queda
