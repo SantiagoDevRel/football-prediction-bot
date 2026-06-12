@@ -1,0 +1,5 @@
+[     795ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ https://santi-bets.vercel.app/:0
+[ 2721765ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://santi-bets.vercel.app/api/bets/resolve:0
+[ 6019316ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://santi-bets.vercel.app/api/bets/resolve:0
+[ 6020955ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ https://santi-bets.vercel.app/:0
+[ 6024322ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://santi-bets.vercel.app/api/bets/resolve:0

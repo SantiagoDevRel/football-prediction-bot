@@ -1,0 +1,69 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - heading "⚽ Santi Bets" [level=1] [ref=e5]
+        - paragraph [ref=e6]: tracker on-chain · Arkiv (Braga testnet)
+      - textbox "PIN admin" [ref=e7]
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - paragraph [ref=e12]: Capital
+        - paragraph [ref=e13]: $ 1.250.000
+      - generic [ref=e14]:
+        - paragraph [ref=e15]: En juego
+        - paragraph [ref=e16]: $ 750.000
+      - generic [ref=e17]:
+        - paragraph [ref=e18]: Récord
+        - paragraph [ref=e19]:
+          - generic [ref=e20]: 0W
+          - text: ·
+          - generic [ref=e21]: 0L
+      - generic [ref=e22]:
+        - paragraph [ref=e23]: P/L neto
+        - paragraph [ref=e24]: $ 0
+    - generic [ref=e25]:
+      - button "+ Nueva apuesta" [ref=e26]
+      - button "💰 Recarga / retiro" [ref=e27]
+    - generic [ref=e28]:
+      - heading "Abiertas (2)" [level=2] [ref=e29]
+      - generic [ref=e30]:
+        - generic [ref=e31]:
+          - generic [ref=e32]:
+            - paragraph [ref=e33]: "Combinada: Méx-Sud + Corea-Chequia (Mundial)"
+            - paragraph [ref=e34]:
+              - generic [ref=e35]: Doble Oportunidad x2 ·
+              - text: Sudáfrica/Empate (6.00) + Corea/Empate (1.42)
+            - paragraph [ref=e36]:
+              - text: 11 de jun, 02:45 p. m.
+              - generic [ref=e37]: · ticket 2058173504
+              - text: · wplay
+          - generic [ref=e38]:
+            - generic [ref=e39]: "8.52"
+            - paragraph [ref=e40]: $ 250.000 → $ 2.130.000
+        - generic [ref=e41]:
+          - button "✓ Gané" [ref=e42]
+          - button "✗ Perdí" [ref=e43]
+      - generic [ref=e44]:
+        - generic [ref=e45]:
+          - generic [ref=e46]:
+            - paragraph [ref=e47]: México vs Sudáfrica (Mundial)
+            - paragraph [ref=e48]:
+              - generic [ref=e49]: Ambos Equipos Anotan ·
+              - text: Sí
+            - paragraph [ref=e50]:
+              - text: 11 de jun, 02:40 p. m.
+              - generic [ref=e51]: · ticket 2058166327
+              - text: · wplay
+          - generic [ref=e52]:
+            - generic [ref=e53]: "2.75"
+            - paragraph [ref=e54]: $ 500.000 → $ 1.375.000
+        - generic [ref=e55]:
+          - button "✓ Gané" [ref=e56]
+          - button "✗ Perdí" [ref=e57]
+    - generic [ref=e58]:
+      - heading "Movimientos de capital" [level=2] [ref=e59]
+      - generic [ref=e60]:
+        - generic [ref=e61]: Recarga Wplay11 de jun, 02:30 p. m.
+        - generic [ref=e62]: +$ 2.000.000
+    - generic [ref=e63]: datos vivos en Arkiv · entidades expiran a los 90 días
+  - alert [ref=e9]

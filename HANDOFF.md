@@ -66,7 +66,7 @@ Sin key, los mensajes de texto libre devuelven una nota pidiendo usar comandos s
 Una vez para programar todo (ejecutar como Administrador):
 
 ```cmd
-cd C:\Users\STZTR\Desktop\claude-code-environment\football-prediction-bot
+cd C:\Users\STZTR\Desktop\claude-code-environment\bots-and-agents\football-prediction-bot
 scripts\install_schedule.cmd
 ```
 
@@ -100,7 +100,7 @@ schtasks /delete /tn FootballBotPersist /f
 ## Si querés correr cosas a mano
 
 ```powershell
-cd C:\Users\STZTR\Desktop\claude-code-environment\football-prediction-bot
+cd C:\Users\STZTR\Desktop\claude-code-environment\bots-and-agents\football-prediction-bot
 $env:PYTHONUTF8 = "1"
 
 # Pipeline diario manual

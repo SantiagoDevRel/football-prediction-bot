@@ -1,0 +1,56 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - heading "Arkiv Network FAUCET" [level=1] [ref=e4]
+      - paragraph [ref=e5]: Get Test GLM for Development on L3
+  - generic [ref=e8]:
+    - generic [ref=e52]:
+      - generic [ref=e53]: L3 Native GLM Balance
+      - generic [ref=e54]: 0.000000 GLM
+    - generic [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]: Wallet Address
+        - textbox "Wallet Address" [ref=e12]:
+          - /placeholder: Enter your wallet address (0x...)
+          - text: "0xe37d436cAe1f64D75f099646872422B3E827999D"
+      - generic [ref=e13]:
+        - heading "Faucet Information" [level=4] [ref=e14]
+        - list [ref=e15]:
+          - listitem [ref=e16]: • You will receive 0.001 GLM test tokens on L3
+          - listitem [ref=e17]: • GLM becomes the native currency on L3 (like ETH on Ethereum)
+          - listitem [ref=e18]: • Tokens have no real value
+          - listitem [ref=e19]: • You must solve a Proof of Work CAPTCHA to receive tokens
+          - listitem [ref=e20]: • Tokens are bridged and will appear in your wallet within seconds
+      - button "You're a human Cap" [ref=e57]:
+        - paragraph [ref=e25]: You're a human
+        - link "Cap" [ref=e26] [cursor=pointer]:
+          - /url: https://capjs.js.org/
+      - generic [ref=e60]:
+        - img [ref=e62]
+        - generic [ref=e65]:
+          - generic [ref=e66]: Waiting for 16 L2 blocks to be processed (~64 seconds)
+          - generic [ref=e67]: "Elapsed: 18s"
+  - generic [ref=e30]:
+    - generic [ref=e31]:
+      - img "Arkiv logo - Universal data layer for Ethereum" [ref=e33]
+      - paragraph [ref=e34]: Access all resources in our Dev Portal
+      - link "Dev Portal" [ref=e35] [cursor=pointer]:
+        - /url: https://arkiv.network/dev
+    - generic [ref=e36]:
+      - img "TypeScript" [ref=e38]
+      - paragraph [ref=e39]: Get Started with TS/JS
+      - link "TS/JS" [ref=e40] [cursor=pointer]:
+        - /url: https://arkiv.network/getting-started/typescript
+    - generic [ref=e41]:
+      - img "Python" [ref=e43]
+      - paragraph [ref=e44]: Get Started with Python
+      - link "Python" [ref=e45] [cursor=pointer]:
+        - /url: https://arkiv.network/getting-started/python
+  - contentinfo [ref=e46]:
+    - generic [ref=e47]:
+      - generic [ref=e48]: "[ Arkiv Network ]"
+      - paragraph [ref=e49]:
+        - text: Powered by
+        - link "Arkiv Network Network" [ref=e50] [cursor=pointer]:
+          - /url: https://arkiv.network
+      - paragraph [ref=e51]: © 2025 Arkiv Network Network. All rights reserved.

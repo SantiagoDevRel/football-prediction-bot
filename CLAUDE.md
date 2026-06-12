@@ -135,3 +135,62 @@ Bot que detecta value bets en fútbol combinando modelos estadísticos (Dixon-Co
 - **Elo dinámico:** rating que se actualiza después de cada partido. Más responsivo que ratings fijos.
 - **Stacking:** ensemble donde un meta-modelo aprende cómo pesar predicciones de modelos base.
 - **Calibración:** que las probabilidades estimadas correspondan a frecuencias reales (si decimos 60%, deberían ganar el 60% de las veces a la larga).
+
+---
+
+## App companion: "Santi Bets" (tracker on-chain en Arkiv)
+
+Cuando el user dice **"la app de las apuestas en Arkiv"**, **"Santi Bets"**, o pide
+**"actualizá la app / marcá que gané/perdí estas apuestas"**, NO es código de este
+repo. Es una app Next.js separada:
+
+- **Ubicación:** `C:\Users\STZTR\Desktop\claude-code-environment\apps\santi-bets\`
+- **Prod:** https://santi-bets.vercel.app (Vercel, projectId en `.vercel/project.json`)
+- **DB:** Arkiv (Braga testnet) como ÚNICA base de datos — sin SQLite/Postgres.
+  Cada apuesta y cada movimiento de capital es una **entity on-chain**.
+- Doc completa de la app: su `README.md` y `lib/arkiv.ts`.
+
+### Modelo de datos (entities Arkiv)
+- `entityType: "bet"` → payload `{match, market, selection, odds, stake, ticket, bookmaker, status, placedAt, resolvedAt}`. `status ∈ {open, won, lost}`.
+- `entityType: "bankroll"` → `{amount (+recarga / −retiro), note, at}`.
+- Atributo de proyecto fijo: `project = santi-bets-stz-4q7m`. Las lecturas filtran por `project` **Y** `createdBy(wallet propia)`.
+- **Solo hay won/lost, NO hay push/refund.** Un Draw-No-Bet que termina en empate (refund) no tiene estado propio.
+
+### Cómo actualizar (la forma que funcionó — 2026-06-11)
+Pegar al **API de prod** (escribe on-chain con la wallet de Vercel; así queda
+consistente con lo que el dashboard lee). PIN admin en header `x-admin-key`
+(local `ADMIN_SECRET=123`; prod resultó ser el mismo).
+
+1. `GET /api/state` → estado actual (bets + stats + wallet). Mirar para no duplicar.
+2. Crear: `POST /api/bets` `{match, market, selection, odds, stake, ticket, bookmaker}` → devuelve `bet.entityKey`. (nace `status:open`.)
+3. Resolver: `POST /api/bets/resolve` `{entityKey, result:"won"|"lost"}`.
+   Para registrar una apuesta ya ganada: crear y resolver seguido (2 tx; el
+   historial open→won queda visible en el explorer, es deseable).
+4. `POST /api/bankroll` `{amount, note}` para recargas/retiros.
+
+Las stats (`available`, `pnl`, récord W/L, `inPlay`) las recalcula `/api/state`
+solo a partir de las entities — no se setean a mano.
+
+### Gotchas (quemadas reales)
+- **`updateEntity` en Arkiv es FULL-REPLACE:** resolver reescribe payload +
+  TODOS los attributes (incluido `project`); si omitís uno, la entity
+  "desaparece" de las queries. Ya resuelto dentro de `lib/arkiv.ts:resolveBet`.
+- **Mojibake con acentos:** la data del seed quedó doble-encodeada (`Méx`→`MÃ©x`)
+  en el dashboard. Al crear apuestas nuevas vía API, **usar ASCII** en `match`/
+  `selection` (ej. "Rep. Checa", no "República Checa") hasta confirmar que el
+  round-trip de acentos esté limpio.
+- **El capital del tracker debe espejar los depósitos reales de Wplay.** El seed
+  inicial traía un `bankroll` redondo de $2.000.000 (placeholder), pero los
+  depósitos reales del 2026-06-11 eran $1.914.000 (14:23) + $600.000 (22:20) =
+  $2.514.000. Reconciliado: borré el seed y creé los dos depósitos reales
+  (`scripts/reconcile-deposits.mjs`). Los depósitos NO afectan `pnl`, solo
+  `available`. `available` puede quedar raro mientras una apuesta está `open`;
+  al resolver vuelve a cuadrar.
+- **El API solo APPENDEA bankroll con `at = Date.now()`** (no acepta timestamp
+  ni edita/borra). Para backfill con fecha correcta, editar, o borrar entities
+  (ej. limpiar un seed), correr un script con la wallet:
+  `wallet.deleteEntity({entityKey})` + `wallet.mutateEntities({creates:[...]})`
+  — patrón en `scripts/seed.mjs` y `scripts/reconcile-deposits.mjs`. Correr con
+  `node --env-file=.env.local scripts/<x>.mjs` desde `apps/santi-bets/`.
+- **Gas:** wallet usa GLM de testnet del faucet de Braga. Si una escritura falla
+  por "insufficient funds", reclamar de nuevo con la dirección de la wallet.

@@ -1,0 +1,5 @@
+[    1526ms] [WARNING] cdn.tailwindcss.com should not be used in production. To use Tailwind CSS in production, install it as a PostCSS plugin or use the Tailwind CLI: https://tailwindcss.com/docs/installation @ https://braga.hoodi.arkiv.network/faucet/assets/css/tailwind.js:63
+[    1910ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ https://braga.hoodi.arkiv.network/favicon.ico:0
+[  133194ms] [LOG] showModal called @ https://braga.hoodi.arkiv.network/faucet/:133
+[  133194ms] [LOG] modal element: JSHandle@node @ https://braga.hoodi.arkiv.network/faucet/:135
+[  369465ms] [LOG] hideModal called @ https://braga.hoodi.arkiv.network/faucet/:140

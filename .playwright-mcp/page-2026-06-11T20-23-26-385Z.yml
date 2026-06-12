@@ -1,0 +1,9 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - heading "⚽ Santi Bets" [level=1] [ref=e5]
+        - paragraph [ref=e6]: tracker on-chain · Arkiv (Braga testnet)
+      - textbox "PIN admin" [ref=e7]
+    - generic [ref=e8]: Cargando desde Arkiv…
+  - alert [ref=e9]
