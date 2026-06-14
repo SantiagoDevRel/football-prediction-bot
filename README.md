@@ -140,6 +140,45 @@ python scripts/init_db.py       # Crear schema SQLite local
 
 ---
 
+## Herramientas en vivo (partidos en curso / Mundial)
+
+Lectura de partidos en vivo desde la API pública de ESPN (sin key, sin cuota).
+Cubre ligas de clubes **y** torneos de selecciones (Mundial, Euro, Copa América).
+
+> ⚠️ **Honestidad sobre los modelos:** Dixon-Coles/Elo/xG están entrenados con
+> fútbol de **clubes**. En **selecciones** (Mundial) no hay edge estadístico
+> (fixtures escasos, sin xG en free-tier). Estas tools leen **stats crudas**, no
+> dan probabilidades de modelo para selecciones.
+
+**Panel de momentum — todas las stats de un partido en vivo:**
+```bash
+python scripts/momentum_panel.py --home Turkey --away Australia
+python scripts/momentum_panel.py --event-id 760421 --league world_cup
+```
+Muestra todas las stats del boxscore (posesión, tiros, al arco, bloqueados,
+córners, centros, faltas, tackles, etc.) + señales derivadas. **Hornea adentro
+el warning "volumen ≠ calidad de gol"**: NO es luz verde para mercados de gol
+(posesión y volumen de tiro son predictores débiles; ESPN da cantidad, no xG).
+Sólo surfacea **córners** como ángulo accionable.
+
+**Monitor de presión de córners (modo watch):**
+```bash
+python scripts/momentum_panel.py --home Germany --away Curacao --watch 60 --favorite home
+```
+Pollea cada N segundos y **alerta** cuando un equipo que va perdiendo/empatando
+acumula córners/centros rápido → ángulo de over córners en vivo.
+
+**Backtest del ángulo de córners** (¿el favorito que persigue genera córners?):
+```bash
+python scripts/backtest_corners_angle.py --min-fav-prob 0.60
+```
+Sobre ~1900 partidos de clubes con `match_stats`. Favorito vía Elo cronológico
+(sin leakage). Mide la **tendencia** con córners finales — **no** ROI live (no
+hay odds históricas de córners en free-tier). El edge real existe sólo si la
+línea live de Wplay va por detrás de la tasa.
+
+---
+
 ## Disciplina y reglas duras
 
 1. **Paper trading mínimo 100+ picks con CLV positivo** antes de tocar plata real.

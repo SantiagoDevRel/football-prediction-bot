@@ -35,6 +35,13 @@ ESPN_LEAGUE_BY_SLUG: dict[str, str] = {
     "sudamericana": "conmebol.sudamericana",
     "libertadores": "conmebol.libertadores",
     "champions_league": "uefa.champions",
+    # Live-only: national-team tournaments. We do NOT train statistical models
+    # on these (selecciones play infrequently, no Understat xG) — see CLAUDE.md
+    # "no predecir mercados sin data". Used only for live momentum panel /
+    # corner-pressure monitor, which read raw boxscore stats, not model output.
+    "world_cup": "fifa.world",
+    "euros": "uefa.euro",
+    "copa_america": "conmebol.america",
 }
 
 
@@ -323,6 +330,114 @@ async def fetch_match_summary(league_slug: str, event_id: str) -> dict | None:
         "away_shots_on_target": safe_int(away_stats.get("shotsOnTarget", "")),
         "home_possession":   safe_float(home_stats.get("possessionPct", "")),
         "away_possession":   safe_float(away_stats.get("possessionPct", "")),
+    }
+
+
+async def fetch_match_full_stats(league_slug: str, event_id: str) -> dict | None:
+    """Full live boxscore: EVERY team statistic ESPN exposes (not the 14-stat
+    subset of fetch_match_summary), plus live score/minute/status from the
+    summary header. Powers the live momentum panel + corner-pressure monitor.
+
+    Returns:
+        {
+          "home_team", "away_team": str,
+          "home_goals", "away_goals": int | None,
+          "minute": int | None, "status": "scheduled"|"live"|"finished"|...,
+          "home": {stat_name: {"label": str, "value": float|None, "display": str}},
+          "away": {...},   # same stat_name keys
+          "stat_order": [stat_name, ...],   # ESPN's display order
+        }
+    None on fetch failure.
+    """
+    league_code = ESPN_LEAGUE_BY_SLUG.get(league_slug)
+    if not league_code:
+        logger.warning(f"unknown league slug: {league_slug}")
+        return None
+    url = f"{ESPN_BASE}/{league_code}/summary"
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers={"accept": "application/json"}) as client:
+            resp = await client.get(url, params={"event": event_id})
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as exc:
+        logger.warning(f"ESPN summary {event_id} failed: {exc}")
+        return None
+
+    teams = (data.get("boxscore") or {}).get("teams") or []
+    if len(teams) < 2:
+        return None
+
+    def num(s: str) -> float | None:
+        try:
+            return float(s) if s not in ("", None) else None
+        except (TypeError, ValueError):
+            return None
+
+    def parse_block(team_block: dict) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for s in team_block.get("statistics", []):
+            if not isinstance(s, dict):
+                continue
+            name = s.get("name")
+            if not name:
+                continue
+            disp = s.get("displayValue", "")
+            out[name] = {
+                "label": s.get("label") or s.get("displayName") or name,
+                "value": num(disp),
+                "display": disp,
+            }
+        return out
+
+    home_block = next((t for t in teams if t.get("homeAway") == "home"), teams[0])
+    away_block = next((t for t in teams if t.get("homeAway") == "away"), teams[1])
+    home_stats = parse_block(home_block)
+    away_stats = parse_block(away_block)
+
+    # Preserve ESPN's stat ordering (union, home order first then any away-only)
+    stat_order = list(home_stats.keys())
+    for k in away_stats:
+        if k not in stat_order:
+            stat_order.append(k)
+
+    # --- score / minute / status from summary header (independent of scoreboard)
+    home_goals = away_goals = None
+    minute = None
+    status = "scheduled"
+    try:
+        comp = (data.get("header") or {}).get("competitions", [{}])[0]
+        competitors = comp.get("competitors", [])
+        h = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        a = next((c for c in competitors if c.get("homeAway") == "away"), None)
+
+        def score(c) -> int | None:
+            if not c:
+                return None
+            try:
+                return int(str(c.get("score", "")).strip())
+            except (TypeError, ValueError):
+                return None
+
+        home_goals, away_goals = score(h), score(a)
+        st = (comp.get("status") or {}).get("type") or {}
+        status = _map_status(st.get("name", ""), st.get("state"))
+        minute = _parse_minute((comp.get("status") or {}).get("displayClock"))
+    except (KeyError, IndexError, TypeError):
+        pass
+
+    def team_name(block: dict) -> str:
+        return (block.get("team") or {}).get("displayName", "?")
+
+    return {
+        "home_team": team_name(home_block),
+        "away_team": team_name(away_block),
+        "home_goals": home_goals,
+        "away_goals": away_goals,
+        "minute": minute,
+        "status": status,
+        "home": home_stats,
+        "away": away_stats,
+        "stat_order": stat_order,
     }
 
 
